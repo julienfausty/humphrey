@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 kraken-async-rs = "0.14.0"
+tokio = "1.50.0"
 
 [[bin]]
 name="fetch"
