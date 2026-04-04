@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+burn = { version = "0.20.1", features = ["cuda", "ndarray", "train", "tui", "wgpu"] }
 csv = "1.4.0"
 kraken-async-rs = "0.14.0"
 serde = { version = "1.0.228", features = ["derive"] }
