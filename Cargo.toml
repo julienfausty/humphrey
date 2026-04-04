@@ -12,3 +12,7 @@ tokio = "1.50.0"
 [[bin]]
 name="fetch"
 path="src/fetch.rs"
+
+[[bin]]
+name="preprocess"
+path="src/preprocess.rs"
