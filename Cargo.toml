@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+csv = "1.4.0"
 kraken-async-rs = "0.14.0"
+serde = { version = "1.0.228", features = ["derive"] }
 tokio = "1.50.0"
 
 [[bin]]
