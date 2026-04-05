@@ -3,9 +3,10 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 
 use csv;
-use std::io::{Read, stdin};
+use std::io::Read;
 
 #[derive(Debug, serde::Deserialize)]
+#[allow(non_snake_case)]
 struct McZielinskiOHLC {
     pub Timestamp: f32,
     pub Low: f32,
@@ -93,13 +94,4 @@ impl<B: Backend> Dataset<OHLCItem<B>> for OHLCDataset<B> {
     fn len(&self) -> usize {
         self.loaded.shape().dims[0] - 2 * self.block_size
     }
-}
-
-fn main() -> Result<(), String> {
-    let device = burn::backend::wgpu::WgpuDevice::default();
-    let ohlc_dataset = OHLCDataset::<burn::backend::Wgpu<f32, i32>>::new(60, stdin(), &device);
-
-    println!("{:?}", ohlc_dataset);
-
-    Ok(())
 }

@@ -15,5 +15,5 @@ name="fetch"
 path="src/fetch.rs"
 
 [[bin]]
-name="preprocess"
-path="src/preprocess.rs"
+name="train"
+path="src/train.rs"
