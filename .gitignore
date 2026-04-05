@@ -1,2 +1,7 @@
+# build
 /target
 Cargo.lock
+
+# data
+/data
+/run
