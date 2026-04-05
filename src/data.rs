@@ -92,6 +92,185 @@ impl<B: Backend> Dataset<OHLCItem<B>> for OHLCDataset<B> {
     }
 
     fn len(&self) -> usize {
-        self.loaded.shape().dims[0] - 2 * self.block_size
+        self.loaded.shape().dims[0] - 2 * self.block_size + 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    use burn::backend::{NdArray, ndarray::NdArrayDevice};
+
+    const VALID_TEST_STRING: &'static str = "\
+        Timestamp,Low,Open,Close,High,Volume\n\
+        1.0,2.0,3.0,4.0,5.0,6.0\n\
+        7.0,8.0,9.0,10.0,11.0,12.0\n\
+        13.0,14.0,15.0,16.0,17.0,18.0\n\
+        19.0,20.0,21.0,22.0,23.0,24.0";
+
+    #[test]
+    fn test_valid_construction_block_1() {
+        let device = NdArrayDevice::default();
+        let result = OHLCDataset::<NdArray>::new(1, VALID_TEST_STRING.as_bytes(), &device);
+        assert!(
+            result.is_ok(),
+            "Failed to construct OHLCDataset {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_valid_construction_block_2() {
+        let device = NdArrayDevice::default();
+        let result = OHLCDataset::<NdArray>::new(2, VALID_TEST_STRING.as_bytes(), &device);
+        assert!(
+            result.is_ok(),
+            "Failed to construct OHLCDataset {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_construction_block_too_large() {
+        let device = NdArrayDevice::default();
+        let result = OHLCDataset::<NdArray>::new(3, VALID_TEST_STRING.as_bytes(), &device);
+        assert!(result.is_err(), "Created dataset with too large of a block");
+    }
+
+    #[test]
+    fn test_construction_bad_format() {
+        let device = NdArrayDevice::default();
+        let result = OHLCDataset::<NdArray>::new(3, "Not right csv format".as_bytes(), &device);
+        assert!(
+            result.is_err(),
+            "Created dataset from badly formatted string"
+        );
+    }
+
+    #[test]
+    fn test_len_block_1() {
+        let device = NdArrayDevice::default();
+        let Ok(dataset) = OHLCDataset::<NdArray>::new(1, VALID_TEST_STRING.as_bytes(), &device)
+        else {
+            panic!("Failed to construct valid dataset");
+        };
+
+        assert_eq!(3, dataset.len());
+    }
+
+    #[test]
+    fn test_len_block_2() {
+        let device = NdArrayDevice::default();
+        let Ok(dataset) = OHLCDataset::<NdArray>::new(2, VALID_TEST_STRING.as_bytes(), &device)
+        else {
+            panic!("Failed to construct valid dataset");
+        };
+
+        assert_eq!(1, dataset.len());
+    }
+
+    #[test]
+    fn test_gets_block_1() {
+        let device = NdArrayDevice::default();
+        let Ok(dataset) = OHLCDataset::<NdArray>::new(1, VALID_TEST_STRING.as_bytes(), &device)
+        else {
+            panic!("Failed to construct valid dataset");
+        };
+
+        let get_opt = dataset.get(0);
+        assert!(get_opt.is_some());
+
+        let got = get_opt.unwrap();
+
+        assert!(
+            got.block
+                .equal(Tensor::<NdArray, 2>::from_data(
+                    [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+                    &device
+                ))
+                .all()
+                .into_scalar()
+        );
+
+        assert!(
+            got.next
+                .equal(Tensor::<NdArray, 2>::from_data(
+                    [[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]],
+                    &device
+                ))
+                .all()
+                .into_scalar()
+        );
+
+        let get_opt = dataset.get(2);
+        assert!(get_opt.is_some());
+
+        let got = get_opt.unwrap();
+
+        assert!(
+            got.block
+                .equal(Tensor::<NdArray, 2>::from_data(
+                    [[13.0, 14.0, 15.0, 16.0, 17.0, 18.0]],
+                    &device
+                ))
+                .all()
+                .into_scalar()
+        );
+
+        assert!(
+            got.next
+                .equal(Tensor::<NdArray, 2>::from_data(
+                    [[19.0, 20.0, 21.0, 22.0, 23.0, 24.0]],
+                    &device
+                ))
+                .all()
+                .into_scalar()
+        );
+
+        assert!(dataset.get(42).is_none());
+    }
+
+    #[test]
+    fn test_gets_block_2() {
+        let device = NdArrayDevice::default();
+        let Ok(dataset) = OHLCDataset::<NdArray>::new(2, VALID_TEST_STRING.as_bytes(), &device)
+        else {
+            panic!("Failed to construct valid dataset");
+        };
+
+        let get_opt = dataset.get(0);
+        assert!(get_opt.is_some());
+
+        let got = get_opt.unwrap();
+
+        assert!(
+            got.block
+                .equal(Tensor::<NdArray, 2>::from_data(
+                    [
+                        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                        [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+                    ],
+                    &device
+                ))
+                .all()
+                .into_scalar()
+        );
+
+        assert!(
+            got.next
+                .equal(Tensor::<NdArray, 2>::from_data(
+                    [
+                        [13.0, 14.0, 15.0, 16.0, 17.0, 18.0],
+                        [19.0, 20.0, 21.0, 22.0, 23.0, 24.0]
+                    ],
+                    &device
+                ))
+                .all()
+                .into_scalar()
+        );
+
+        assert!(dataset.get(1).is_none());
     }
 }
