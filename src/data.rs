@@ -1,3 +1,4 @@
+use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataset::Dataset;
 use burn::data::dataset::transform::Mapper;
 use burn::prelude::s;
@@ -132,6 +133,24 @@ impl<B: Backend> Mapper<OHLCItem<B>, OHLCItem<B>> for NormalizeOHLCItem {
         let next = next.slice_assign(s![0.., 5], next_vols);
 
         OHLCItem { block, next }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OHLCBatch<B: Backend> {
+    pub blocks: Tensor<B, 3>,
+    pub nexts: Tensor<B, 3>,
+}
+
+#[derive(Clone, Default)]
+pub struct OHLCBatcher {}
+
+impl<B: Backend> Batcher<B, OHLCItem<B>, OHLCBatch<B>> for OHLCBatcher {
+    fn batch(&self, items: Vec<OHLCItem<B>>, _device: &B::Device) -> OHLCBatch<B> {
+        OHLCBatch {
+            blocks: Tensor::stack(items.iter().map(|item| item.block.clone()).collect(), 0),
+            nexts: Tensor::stack(items.iter().map(|item| item.next.clone()).collect(), 0),
+        }
     }
 }
 
@@ -472,5 +491,63 @@ mod tests {
                 .all()
                 .into_scalar()
         );
+    }
+
+    #[test]
+    fn test_batch_items() {
+        let device = NdArrayDevice::default();
+        let test_item = OHLCItem::<NdArray> {
+            block: Tensor::<NdArray, 2>::from_data(
+                [
+                    [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                    [6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                    [12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
+                    [18.0, 19.0, 20.0, 21.0, 22.0, 23.0],
+                ],
+                &device,
+            ),
+            next: Tensor::<NdArray, 2>::from_data(
+                [
+                    [30.0, 31.0, 32.0, 33.0, 34.0, 35.0],
+                    [36.0, 37.0, 38.0, 39.0, 40.0, 41.0],
+                    [42.0, 43.0, 44.0, 45.0, 46.0, 47.0],
+                    [48.0, 49.0, 50.0, 51.0, 52.0, 53.0],
+                ],
+                &device,
+            ),
+        };
+
+        let batcher = OHLCBatcher {};
+        let batched = batcher.batch(
+            vec![test_item.clone(), test_item.clone(), test_item.clone()],
+            &device,
+        );
+
+        assert!(batched.blocks.shape().dims() == [3, 4, 6]);
+        assert!(batched.nexts.shape().dims() == [3, 4, 6]);
+
+        for i_dim in 0..3 {
+            assert!(
+                batched
+                    .blocks
+                    .clone()
+                    .slice(s![i_dim, .., ..])
+                    .reshape([4, 6])
+                    .equal(test_item.block.clone())
+                    .all()
+                    .into_scalar()
+            );
+
+            assert!(
+                batched
+                    .nexts
+                    .clone()
+                    .slice(s![i_dim, .., ..])
+                    .reshape([4, 6])
+                    .equal(test_item.next.clone())
+                    .all()
+                    .into_scalar()
+            );
+        }
     }
 }
