@@ -1,14 +1,18 @@
 use burn::backend::{Wgpu, wgpu::WgpuDevice};
 use burn::config::Config;
+use burn::data::dataloader::{DataLoader, DataLoaderBuilder};
 use burn::data::dataset::Dataset;
-use burn::data::dataset::transform::MapperDataset;
+use burn::data::dataset::transform::{MapperDataset, SelectionDataset};
+use burn::tensor::backend::Backend;
 
-use std::io::stdin;
+use rand::{RngExt, SeedableRng, rngs::ChaCha8Rng};
+
+use std::collections::HashSet;
+use std::io::{Read, Stdin, stdin};
+use std::sync::Arc;
 
 mod data;
-use data::{NormalizeOHLCItem, OHLCDataset, OHLCItem};
-
-type Backend = Wgpu<f32, i32>;
+use data::{NormalizeOHLCItem, OHLCBatch, OHLCBatcher, OHLCDataset};
 
 #[derive(Config, Debug)]
 struct DataConfig {
@@ -20,20 +24,89 @@ struct DataConfig {
     pub batch_size: usize,
     #[config(default = 4)]
     pub num_workers: usize,
+    #[config(default = 64)]
+    pub window_size: usize,
     #[config(default = 42)]
     pub seed: u64,
 }
 
-impl DataConfig {}
+impl DataConfig {
+    pub fn build<R: Read, B: Backend>(
+        &self,
+        source: R,
+        device: &B::Device,
+    ) -> Result<
+        (
+            Arc<dyn DataLoader<B, OHLCBatch<B>>>,
+            Arc<dyn DataLoader<B, OHLCBatch<B>>>,
+        ),
+        String,
+    > {
+        let base_dataset = match OHLCDataset::<B>::new(self.window_size.clone(), source, &device) {
+            Ok(ds) => ds,
+            Err(message) => return Err(message),
+        };
+
+        let visible_portion = (base_dataset.len() as f32 * self.use_only) as usize;
+        let block_size = 4 * self.window_size + self.batch_size.clone();
+        let total_visible_blocks = visible_portion / block_size.clone();
+        let number_test_blocks =
+            (total_visible_blocks.clone() as f32 * (1.0 - self.train_split)) as usize;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(self.seed.clone());
+        let test_blocks: HashSet<usize> = (0..number_test_blocks)
+            .map(|_| rng.random_range(0..total_visible_blocks.clone()))
+            .collect();
+
+        let train_blocks: Vec<usize> = (0..total_visible_blocks)
+            .filter(|i_block| !test_blocks.contains(i_block))
+            .collect();
+        let test_blocks = Vec::from_iter(test_blocks.into_iter());
+
+        let unroll = |set: Vec<usize>| {
+            let mut unrolled = Vec::with_capacity(set.len() * block_size.clone());
+            let origin = base_dataset.len();
+            for i_block in set.into_iter() {
+                let offset = block_size.clone() * i_block;
+                for j_inner in 0..block_size.clone() {
+                    unrolled.push(origin - offset - j_inner - 1)
+                }
+            }
+            unrolled
+        };
+
+        let batcher = OHLCBatcher {};
+
+        let train_set = DataLoaderBuilder::new(batcher.clone())
+            .batch_size(self.batch_size.clone())
+            .shuffle(self.seed.clone())
+            .num_workers(self.num_workers.clone())
+            .build(SelectionDataset::from_indices_unchecked(
+                MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem),
+                unroll(train_blocks),
+            ));
+
+        let test_set = DataLoaderBuilder::new(batcher.clone())
+            .batch_size(self.batch_size.clone())
+            .shuffle(self.seed.clone())
+            .num_workers(self.num_workers.clone())
+            .build(SelectionDataset::from_indices_unchecked(
+                MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem),
+                unroll(test_blocks),
+            ));
+
+        Ok((train_set, test_set))
+    }
+}
+
+type BackendInUse = Wgpu<f32, i32>;
 
 fn main() -> Result<(), String> {
     let device = WgpuDevice::default();
-    let ohlc_dataset = OHLCDataset::<Backend>::new(64, stdin(), &device).unwrap();
 
-    let mapped_dataset: MapperDataset<_, _, OHLCItem<Backend>> =
-        MapperDataset::new(ohlc_dataset, NormalizeOHLCItem);
+    let split_sets = DataConfig::new().build::<Stdin, BackendInUse>(stdin(), &device);
 
-    println!("{:?}", mapped_dataset.get(0));
+    println!("{:?}", split_sets.unwrap().0.iter().next());
 
     Ok(())
 }
