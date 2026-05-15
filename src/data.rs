@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::sync::Arc;
 
+/// In memory structure for a line of CSV data
 #[derive(Debug, serde::Deserialize)]
 #[allow(non_snake_case)]
 struct McZielinskiOHLC {
@@ -25,6 +26,7 @@ struct McZielinskiOHLC {
     pub Volume: f32,
 }
 
+/// Function for parsing McZielinski formated OHLC data from a readable object
 fn parse<T: Read>(source: T) -> Result<Vec<f32>, String> {
     let mut ohlc_data = Vec::new();
     let mut reader = csv::Reader::from_reader(source);
@@ -44,12 +46,14 @@ fn parse<T: Read>(source: T) -> Result<Vec<f32>, String> {
     Ok(ohlc_data)
 }
 
+/// A item pair of OHLC block data and data that immediately follows it
 #[derive(Debug, Clone)]
 pub struct OHLCItem<B: Backend> {
     pub block: Tensor<B, 2>,
     pub next: Tensor<B, 2>,
 }
 
+/// Object implementing the Dataset trait containing the entire raw OHLC data base (on device)
 #[derive(Debug, Clone)]
 pub struct OHLCDataset<B: Backend> {
     block_size: usize,
@@ -57,6 +61,8 @@ pub struct OHLCDataset<B: Backend> {
 }
 
 impl<B: Backend> OHLCDataset<B> {
+    /// Constructor for the dataset that takes a readable source of data and a desired block size
+    /// Data is read into CPU memory and copied over to device memory in tensor format
     pub fn new<Src: Read>(
         block_size: usize,
         source: Src,
@@ -105,6 +111,7 @@ impl<B: Backend> Dataset<OHLCItem<B>> for OHLCDataset<B> {
     }
 }
 
+/// Normalizer for OHLCItem data towards values varying around 1.0
 pub struct NormalizeOHLCItem;
 
 impl<B: Backend> Mapper<OHLCItem<B>, OHLCItem<B>> for NormalizeOHLCItem {
@@ -142,12 +149,14 @@ impl<B: Backend> Mapper<OHLCItem<B>, OHLCItem<B>> for NormalizeOHLCItem {
     }
 }
 
+/// A batch of OHLCItems
 #[derive(Debug, Clone)]
 pub struct OHLCBatch<B: Backend> {
     pub blocks: Tensor<B, 3>,
     pub nexts: Tensor<B, 3>,
 }
 
+/// A structure implementing the Batcher trait for combining OHLCItems into OHLCBatches
 #[derive(Clone, Default)]
 pub struct OHLCBatcher {}
 
@@ -160,6 +169,7 @@ impl<B: Backend> Batcher<B, OHLCItem<B>, OHLCBatch<B>> for OHLCBatcher {
     }
 }
 
+/// Utility struct for configuring the train/test data split and providing data loaders for training
 #[derive(Config, Debug)]
 pub struct DataConfig {
     #[config(default = 1.0)]
@@ -177,6 +187,8 @@ pub struct DataConfig {
 }
 
 impl DataConfig {
+    /// Method for coalescing the builder pattern into the train and test data (respectively)
+    /// User must provide a readable source formatted in McZielinski CSV style
     pub fn build<R: Read, B: Backend>(
         &self,
         source: R,
