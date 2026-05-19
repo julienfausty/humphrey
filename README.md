@@ -36,19 +36,21 @@ Data is read into disk and immediate stored in a (N, 6) tensor on device memory.
 For training, the data is windowed (following a user defined window size) and each window is normalized around unity as:
 
 ```math
-\tilde{t} = \frac{(t - t_{start})}{(t_{end} - t_{start})}
-\tilde{p} = \frac{p}{p_{max}}
-\tilde{v} = \frac{v}{v_{max}}
+\begin{split}
+\tilde{t} &= \frac{(t - t_{start})}{(t_{end} - t_{start})}\\
+\tilde{p} &= \frac{p}{p_{max}}\\
+\tilde{v} &= \frac{v}{v_{max}}
+\end{split}
 ```
 
 where:
-* `t`, `p` and `v` are time, price (low, high, open and close together) and volume respectively, and
+* $t$, $p$ and $v$ are time, price (low, high, open and close together) and volume respectively, and
 * tilded quantities are normalized
 
 Each item passed to training contains an OHLC data window and the next unoverlapping window normalized with the values from the current window for evaluating loss and predictive power.
 
 Data is split by:
-* first, chunking the data set into blocks of size `4 x window size + block_size` where the block size is a user parameter,
+* first, chunking the data set into blocks of size `4 x window_size + block_size` where the block size is a user parameter,
 * then, splitting the blocks randomly into a test and train sets,
 * with finally, unblocking the data into individual items once again.
 
