@@ -5,6 +5,8 @@ use std::io::{Stdin, stdin};
 mod data;
 use data::DataConfig;
 
+mod model;
+
 type BackendInUse = Wgpu<f32, i32>;
 
 fn main() -> Result<(), String> {
