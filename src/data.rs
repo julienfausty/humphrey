@@ -107,7 +107,7 @@ impl<B: Backend> Dataset<OHLCItem<B>> for OHLCDataset<B> {
     }
 
     fn len(&self) -> usize {
-        self.loaded.shape().dims[0] - 2 * self.block_size + 1
+        self.loaded.shape()[0] - 2 * self.block_size + 1
     }
 }
 
