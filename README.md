@@ -36,7 +36,7 @@ Data used to train the model can be found at: [https://www.kaggle.com/datasets/m
 
 It is 1-minute OHLC Bitcoin data from 2012 to present day sourced from the [Bitstamp API](https://www.bitstamp.net/api/) and updated regularly.
 
-The data is contained in a single csv file with following columns:
+The data is contained in a single csv file with following columns in order:
 - Timestamp
 - Open
 - High
@@ -60,7 +60,7 @@ For training, the data is windowed (following a user defined window size) and ea
 
 where:
 * $t$, $p$ and $v$ are time, price (low, high, open and close together) and volume respectively, and
-* tilded quantities are normalized
+* tilded quantities are normalized (in the rest of the document, we will only use normalized quantities unless specified and so the tilde is omitted)
 
 Each item passed to training contains an OHLC data window and the next unoverlapping window normalized with the values from the current window for evaluating loss and predictive power.
 
@@ -140,9 +140,17 @@ we choose $\tau$ arbitrarily equal to $\frac{1}{3}$.
 Given the structure given to the candlestick contribution, in order to calculate the integral in practice, we can use the convolution of the gaussian with a fixed width and height uniform distribution:
 
 ```math
-\int_{a}^{b} \frac{1}{b-a} g_{i}(p) dp = \frac{1}{b-a} \dfrac{N-1}{\sqrt{2}2} \left(\erf\left(\frac{b(N-1) - 2i}{\sqrt{2}}\right) - \erf\left(\frac{a(N-1) - 2i}{\sqrt{2}\right)\right)
+\int_{a}^{b} \frac{1}{b-a} g_{i}(p) dp = \frac{1}{b-a} \dfrac{N-1}{\sqrt{2}2} \left(\erf\left(\frac{b(N-1) - 2i}{\sqrt{2}}\right) - \erf\left(\frac{a(N-1) - 2i}{\sqrt{2}}\right)\right)
 ```
 
 where $\erf$ is the ["error function"](https://mathworld.wolfram.com/Erf.html).
 
+The loss of the model can then computed using the [Kullback-Leibler divergence](https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence) for evaluating the non-similarity between probability distributions:
+```math
+\mathcal{L}(\tilde{\phi}, \phi) = \int_{0}^{2} \tilde{\phi}\log\frac{\tilde{\phi}}{\phi} dp
+```
 
+For simplicity, a proxy/approximation of the loss is computed discretely with:
+```math
+L(\tilde{\phi}, \phi) = \sum_{i = 0}^{N-1} \tilde{\omega}_{i} \log\frac{\tilde{\omega}_{i}}{\omega{i}}
+```
