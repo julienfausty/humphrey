@@ -66,7 +66,7 @@ impl<B: Backend> OHLCDataset<B> {
     pub fn new<Src: Read>(
         block_size: usize,
         source: Src,
-        device: &<B as Backend>::Device,
+        device: &B::Device,
     ) -> Result<OHLCDataset<B>, String> {
         let raw = match parse(source) {
             Ok(raw) => raw,
