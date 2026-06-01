@@ -169,6 +169,85 @@ impl<B: Backend> Batcher<B, OHLCItem<B>, OHLCBatch<B>> for OHLCBatcher {
     }
 }
 
+// Implements a projection operation from normalized OHLC data to price distribution between (0, 2). Projection takes into account volumes and discount from t = 0.0
+pub struct OHLC2Distribution;
+
+impl OHLC2Distribution {
+    pub fn project<B: Backend>(&self, ohlc: Tensor<B, 3>, grid_size: usize) -> Tensor<B, 2> {
+        let prices = ohlc
+            .clone()
+            .slice(s![0.., 0.., 1..5])
+            .sort(2)
+            .clamp(0.0, 2.0);
+        let times = ohlc.clone().slice(s![0.., 0.., 0]);
+        let volumes = ohlc.clone().slice(s![0.., 0.., 5]);
+
+        let integral_measure = (prices.clone().slice(s![0.., 0.., 1..4])
+            - prices.clone().slice(s![0.., 0.., 0..3]))
+        .recip()
+        .matmul(Tensor::from_data(
+            [[
+                [1.0 / 6.0, 0.0, 0.0],
+                [0.0, 2.0 / 3.0, 0.0],
+                [0.0, 0.0, 1.0 / 6.0],
+            ]],
+            &prices.device(),
+        ))
+        .mul_scalar((grid_size - 1) as f64 / ((2.0 as f64).sqrt() * 2.0))
+        .mul(
+            times
+                .div_scalar(1.0 / 3.0)
+                .neg()
+                .exp()
+                .mul(volumes)
+                .repeat_dim(2, 3),
+        );
+
+        let convolution = (0..grid_size).fold(
+            Tensor::<B, 3>::zeros(
+                [prices.shape()[0], prices.shape()[1], grid_size],
+                &prices.device(),
+            ),
+            |acc, i_grid| {
+                let contribution = (0..3).fold(
+                    Tensor::<B, 3>::zeros(
+                        [prices.shape()[0], prices.shape()[1], 1],
+                        &prices.device(),
+                    ),
+                    |acc_inner, i_ohlc| {
+                        acc_inner
+                            + integral_measure.clone().slice(s![0.., 0.., i_ohlc]).mul(
+                                (prices
+                                    .clone()
+                                    .slice(s![0.., 0.., i_ohlc + 1])
+                                    .mul_scalar((grid_size - 1) as f64)
+                                    - ((2 * i_grid) as f64))
+                                    .div_scalar((2.0 as f64).sqrt())
+                                    .erf()
+                                    - (prices
+                                        .clone()
+                                        .slice(s![0.., 0.., i_ohlc])
+                                        .mul_scalar((grid_size - 1) as f64)
+                                        - ((2 * i_grid) as f64))
+                                        .div_scalar((2.0 as f64).sqrt())
+                                        .erf(),
+                            )
+                    },
+                );
+                acc.clone().slice_assign(
+                    s![0.., 0.., i_grid],
+                    contribution + acc.clone().slice(s![0.., 0.., i_grid]),
+                )
+            },
+        );
+
+        let convolution = convolution.sum_dim(1).reshape([0, -1]);
+        convolution
+            .clone()
+            .div(convolution.clone().sum_dim(1).repeat_dim(1, grid_size))
+    }
+}
+
 /// Utility struct for configuring the train/test data split and providing data loaders for training
 #[derive(Config, Debug)]
 pub struct DataConfig {
@@ -270,6 +349,8 @@ mod tests {
         7.0,8.0,9.0,10.0,11.0,12.0\n\
         13.0,14.0,15.0,16.0,17.0,18.0\n\
         19.0,20.0,21.0,22.0,23.0,24.0";
+
+    const EPS: f32 = 1e-8;
 
     #[test]
     fn test_valid_construction_block_1() {
@@ -652,5 +733,61 @@ mod tests {
                     .into_scalar()
             );
         }
+    }
+
+    #[test]
+    fn test_simple_ohlc_2_distribution() {
+        let projector = OHLC2Distribution;
+
+        let device = NdArrayDevice::default();
+
+        let test_ohlc =
+            Tensor::<NdArray, 1>::from_data([0.0, 0.0, 1.0 / 3.0, 5.0 / 3.0, 2.0, 1.0], &device)
+                .reshape([1, 1, 6]);
+
+        let projection = projector.project(test_ohlc, 10);
+
+        assert!(projection.shape().len() == 2);
+        assert!(projection.shape()[0] == 1);
+        assert!(projection.shape()[1] == 10);
+
+        assert!(projection.clone().sum().into_scalar() == 1.0);
+        let projection_data: Vec<f32> = projection.clone().to_data().into_vec().unwrap();
+
+        assert!((projection_data[0] - projection_data[9]).powf(2.0) < EPS);
+        assert!((projection_data[1] - projection_data[8]).powf(2.0) < EPS);
+        for i_grid in 3..8 {
+            assert!((projection_data[i_grid] - projection_data[2]).powf(2.0) < EPS);
+        }
+
+        assert!((2.0 * projection_data[0] - projection_data[2]).powf(2.0) < EPS);
+    }
+
+    #[test]
+    fn test_random_ohlc_2_distribution() {
+        let projector = OHLC2Distribution;
+
+        let device = NdArrayDevice::default();
+
+        let test_ohlc =
+            Tensor::<NdArray, 1>::from_data([0.0, 0.0, 1.0 / 3.0, 5.0 / 3.0, 2.0, 1.0], &device)
+                .reshape([1, 1, 6]);
+
+        let projection = projector.project(test_ohlc, 10);
+
+        assert!(projection.shape().len() == 2);
+        assert!(projection.shape()[0] == 1);
+        assert!(projection.shape()[1] == 10);
+
+        assert!(projection.clone().sum().into_scalar() == 1.0);
+        let projection_data: Vec<f32> = projection.clone().to_data().into_vec().unwrap();
+
+        assert!((projection_data[0] - projection_data[9]).powf(2.0) < EPS);
+        assert!((projection_data[1] - projection_data[8]).powf(2.0) < EPS);
+        for i_grid in 3..8 {
+            assert!((projection_data[i_grid] - projection_data[2]).powf(2.0) < EPS);
+        }
+
+        assert!((2.0 * projection_data[0] - projection_data[2]).powf(2.0) < EPS);
     }
 }
