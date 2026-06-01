@@ -150,7 +150,7 @@ The loss of the model can then computed using the [Kullback-Leibler divergence](
 \mathcal{L}(\tilde{\phi}, \phi) = \int_{0}^{2} \tilde{\phi}\log\frac{\tilde{\phi}}{\phi} dp
 ```
 
-For simplicity, a proxy/approximation of the loss is computed discretely with:
+For simplicity, a proxy of the loss is computed discretely with:
 ```math
 L(\tilde{\phi}, \phi) = \sum_{i = 0}^{N-1} \tilde{\omega}_{i} \log\frac{\tilde{\omega}_{i}}{\omega{i}}
 ```

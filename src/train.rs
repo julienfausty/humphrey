@@ -22,25 +22,17 @@ impl<B: AutodiffBackend> TrainStep for Rooney<B> {
 
         let grid_size = pass.shape()[1];
 
-        let prices = batch.nexts.clone().slice(s![0.., 0.., 1..5]);
+        let projector = OHLC2Distribution;
 
-        // gaussian kernel density estimation of next distribution over regular grid defined between [0, 2] with grid_size steps to generate targets
-        // use OHLC data to define standard deviation for each of the contributions
-        // weigh each of the contributions by decreasing exponential in time and volume of activity
-        // normalize the sum at the end
-        // KLDivLoss to generate loss
-
-        let convolution = Tensor::<B, 3>::zeros(
-            [prices.shape()[0], prices.shape()[1], grid_size],
-            &prices.device(),
+        let targets = projector.project(
+            batch.nexts.clone().slice_assign(
+                s![0.., 0.., 0],
+                batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
+            ),
+            grid_size,
         );
 
-        let targets = Tensor::<B, 2>::zeros(pass.shape(), &pass.device());
-
-        let loss =
-            KLDivLossConfig::new()
-                .init()
-                .forward(pass.clone(), targets.clone(), Reduction::Auto);
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Auto);
 
         let output = RegressionOutput::new(loss, pass, targets);
 
