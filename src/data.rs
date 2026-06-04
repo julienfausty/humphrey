@@ -179,67 +179,84 @@ impl OHLC2Distribution {
             .slice(s![0.., 0.., 1..5])
             .sort(2)
             .clamp(0.0, 2.0);
-        let times = ohlc.clone().slice(s![0.., 0.., 0]);
+        let time_discount = ohlc
+            .clone()
+            .slice(s![0.., 0.., 0])
+            .div_scalar(-1.0 / 3.0)
+            .exp();
         let volumes = ohlc.clone().slice(s![0.., 0.., 5]);
 
-        let integral_measure = (prices.clone().slice(s![0.., 0.., 1..4])
-            - prices.clone().slice(s![0.., 0.., 0..3]))
-        .recip()
-        .matmul(Tensor::from_data(
-            [[
-                [1.0 / 6.0, 0.0, 0.0],
-                [0.0, 2.0 / 3.0, 0.0],
-                [0.0, 0.0, 1.0 / 6.0],
-            ]],
-            &prices.device(),
-        ))
-        .mul_scalar((grid_size - 1) as f64 / ((2.0 as f64).sqrt() * 2.0))
-        .mul(
-            times
-                .div_scalar(1.0 / 3.0)
-                .neg()
-                .exp()
-                .mul(volumes)
-                .repeat_dim(2, 3),
+        let anchors = prices.clone().matmul(
+            Tensor::<B, 3>::from_data(
+                [[
+                    [1.0 / 6.0, -1.0 / 4.0],
+                    [1.0 / 3.0, -1.0 / 4.0],
+                    [1.0 / 3.0, 1.0 / 4.0],
+                    [1.0 / 6.0, 1.0 / 4.0],
+                ]],
+                &prices.clone().device(),
+            )
+            .repeat_dim(0, prices.shape()[0]),
         );
 
-        let convolution = (0..grid_size).fold(
+        let a = (grid_size - 1) as f64;
+        let c = anchors.clone().slice(s![0.., 0.., 1]).recip();
+        let d = anchors.clone().slice(s![0.., 0.., 0]).mul(c.clone());
+
+        let a2c2 = c.clone().powf_scalar(2.0) + a.powf(2.0);
+
+        let integral_measure = a2c2
+            .clone()
+            .mul_scalar(8.0 * std::f64::consts::PI)
+            .sqrt()
+            .recip()
+            .mul_scalar(a)
+            .mul(time_discount)
+            .mul(volumes);
+
+        let exponential_term = (0..grid_size).fold(
             Tensor::<B, 3>::zeros(
                 [prices.shape()[0], prices.shape()[1], grid_size],
                 &prices.device(),
             ),
             |acc, i_grid| {
-                let contribution = (0..3).fold(
-                    Tensor::<B, 3>::zeros(
-                        [prices.shape()[0], prices.shape()[1], 1],
-                        &prices.device(),
-                    ),
-                    |acc_inner, i_ohlc| {
-                        acc_inner
-                            + integral_measure.clone().slice(s![0.., 0.., i_ohlc]).mul(
-                                (prices
-                                    .clone()
-                                    .slice(s![0.., 0.., i_ohlc + 1])
-                                    .mul_scalar((grid_size - 1) as f64)
-                                    - ((2 * i_grid) as f64))
-                                    .div_scalar((2.0 as f64).sqrt())
-                                    .erf()
-                                    - (prices
-                                        .clone()
-                                        .slice(s![0.., 0.., i_ohlc])
-                                        .mul_scalar((grid_size - 1) as f64)
-                                        - ((2 * i_grid) as f64))
-                                        .div_scalar((2.0 as f64).sqrt())
-                                        .erf(),
-                            )
-                    },
-                );
+                let b = 2.0 * (i_grid as f64);
+                let contribution = (c.clone().mul_scalar(b) - d.clone().mul_scalar(a))
+                    .powf_scalar(2.0)
+                    .div(a2c2.clone().mul_scalar(2))
+                    .neg()
+                    .exp();
                 acc.clone().slice_assign(
                     s![0.., 0.., i_grid],
                     contribution + acc.clone().slice(s![0.., 0.., i_grid]),
                 )
             },
         );
+
+        let erf_term = (0..grid_size).fold(
+            Tensor::<B, 3>::zeros(
+                [prices.shape()[0], prices.shape()[1], grid_size],
+                &prices.device(),
+            ),
+            |acc, i_grid| {
+                let b = 2.0 * (i_grid as f64);
+                let sqrt_two_a2c2 = a2c2.clone().mul_scalar(2.0).sqrt();
+                let ab_plus_cd = c.clone().mul(d.clone()) + a * b;
+                let contribution = (a2c2.clone().mul_scalar(2.0) - ab_plus_cd.clone())
+                    .div(sqrt_two_a2c2.clone())
+                    .erf()
+                    - ab_plus_cd.clone().neg().div(sqrt_two_a2c2.clone()).erf();
+                acc.clone().slice_assign(
+                    s![0.., 0.., i_grid],
+                    contribution + acc.clone().slice(s![0.., 0.., i_grid]),
+                )
+            },
+        );
+
+        let convolution = integral_measure
+            .repeat_dim(2, grid_size)
+            .mul(exponential_term)
+            .mul(erf_term);
 
         let convolution = convolution.sum_dim(1).reshape([0, -1]);
         convolution
@@ -769,9 +786,8 @@ mod tests {
 
         let device = NdArrayDevice::default();
 
-        let test_ohlc =
-            Tensor::<NdArray, 1>::from_data([0.0, 0.0, 1.0 / 3.0, 5.0 / 3.0, 2.0, 1.0], &device)
-                .reshape([1, 1, 6]);
+        let test_ohlc = Tensor::<NdArray, 1>::from_data([0.0, 0.0, 0.0, 2.0, 2.0, 1.0], &device)
+            .reshape([1, 1, 6]);
 
         let projection = projector.project(test_ohlc, 10);
 
@@ -781,13 +797,6 @@ mod tests {
 
         assert!(projection.clone().sum().into_scalar() == 1.0);
         let projection_data: Vec<f32> = projection.clone().to_data().into_vec().unwrap();
-
-        assert!((projection_data[0] - projection_data[9]).powf(2.0) < EPS);
-        assert!((projection_data[1] - projection_data[8]).powf(2.0) < EPS);
-        for i_grid in 3..8 {
-            assert!((projection_data[i_grid] - projection_data[2]).powf(2.0) < EPS);
-        }
-
-        assert!((2.0 * projection_data[0] - projection_data[2]).powf(2.0) < EPS);
+        panic!("{:?}", projection_data);
     }
 }
