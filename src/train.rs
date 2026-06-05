@@ -1,4 +1,4 @@
-use burn::backend::{Wgpu, wgpu::WgpuDevice};
+use burn::backend::{Autodiff, Wgpu, wgpu::WgpuDevice};
 use burn::config::Config;
 use burn::module::Module;
 use burn::nn::loss::{MseLoss, Reduction};
@@ -88,11 +88,7 @@ fn create_artifact_dir(artifact_dir: &str) {
     std::fs::create_dir_all(artifact_dir).ok();
 }
 
-pub fn train<B: AutodiffBackend<InnerBackend = B>>(
-    artifact_dir: &str,
-    config: TrainingConfig,
-    device: B::Device,
-) {
+pub fn train<B: AutodiffBackend>(artifact_dir: &str, config: TrainingConfig, device: B::Device) {
     create_artifact_dir(artifact_dir);
     config
         .save(format!("{artifact_dir}/config.json"))
@@ -123,20 +119,31 @@ pub fn train<B: AutodiffBackend<InnerBackend = B>>(
 }
 
 type BackendInUse = Wgpu<f32, i32>;
+type AutodiffBackendInUse = Autodiff<BackendInUse>;
 
 fn main() -> Result<(), String> {
     let device = WgpuDevice::default();
 
-    let split_sets = DataConfig::new()
-        .build::<Stdin, BackendInUse>(stdin(), &device)
-        .unwrap();
+    let artifact_dir = "/tmp/rooney";
 
-    println!(
-        "split: train {}, test {}",
-        split_sets.0.num_items(),
-        split_sets.1.num_items()
+    let window_size = 64;
+
+    let data_config = DataConfig::new()
+        .with_use_only(0.0005)
+        .with_window_size(window_size);
+
+    let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 10)
+        .with_n_attention_heads(1)
+        .with_n_expansion_stacks(1)
+        .with_n_thinking_stacks(1)
+        .with_n_reasoning_layers(1)
+        .with_n_distillation_layers(1);
+
+    train::<AutodiffBackendInUse>(
+        artifact_dir,
+        TrainingConfig::new(data_config, model_config, AdamConfig::new()).with_num_epochs(2),
+        device.clone(),
     );
-    println!("{:?}", split_sets.0.iter().next());
 
     Ok(())
 }

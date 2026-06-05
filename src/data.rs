@@ -4,7 +4,7 @@ use burn::data::dataloader::{DataLoader, DataLoaderBuilder};
 use burn::data::dataset::Dataset;
 use burn::data::dataset::transform::{Mapper, MapperDataset, SelectionDataset};
 use burn::prelude::s;
-use burn::tensor::backend::Backend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Tensor, TensorData};
 
 use rand::{RngExt, SeedableRng, rngs::ChaCha8Rng};
@@ -149,6 +149,17 @@ impl<B: Backend> Mapper<OHLCItem<B>, OHLCItem<B>> for NormalizeOHLCItem {
     }
 }
 
+pub struct ToInnerBackend;
+
+impl<B: AutodiffBackend> Mapper<OHLCItem<B>, OHLCItem<B::InnerBackend>> for ToInnerBackend {
+    fn map(&self, item: &OHLCItem<B>) -> OHLCItem<B::InnerBackend> {
+        OHLCItem {
+            block: item.block.clone().inner(),
+            next: item.next.clone().inner(),
+        }
+    }
+}
+
 /// A batch of OHLCItems
 #[derive(Debug, Clone)]
 pub struct OHLCBatch<B: Backend> {
@@ -285,14 +296,14 @@ pub struct DataConfig {
 impl DataConfig {
     /// Method for coalescing the builder pattern into the train and test data (respectively)
     /// User must provide a readable source formatted in McZielinski CSV style
-    pub fn build<R: Read, B: Backend>(
+    pub fn build<R: Read, B: AutodiffBackend>(
         &self,
         source: R,
         device: &B::Device,
     ) -> Result<
         (
             Arc<dyn DataLoader<B, OHLCBatch<B>>>,
-            Arc<dyn DataLoader<B, OHLCBatch<B>>>,
+            Arc<dyn DataLoader<B::InnerBackend, OHLCBatch<B::InnerBackend>>>,
         ),
         String,
     > {
@@ -345,7 +356,10 @@ impl DataConfig {
             .shuffle(self.seed.clone())
             .num_workers(self.num_workers.clone())
             .build(SelectionDataset::from_indices_unchecked(
-                MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem),
+                MapperDataset::new(
+                    MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem),
+                    ToInnerBackend,
+                ),
                 unroll(test_blocks),
             ));
 
