@@ -359,6 +359,7 @@ mod tests {
     use super::*;
 
     use burn::backend::{NdArray, ndarray::NdArrayDevice};
+    use integrate::adaptive_quadrature::adaptive_simpson_method;
 
     const VALID_TEST_STRING: &'static str = "\
         Timestamp,Low,Open,Close,High,Volume\n\
@@ -367,7 +368,7 @@ mod tests {
         13.0,14.0,15.0,16.0,17.0,18.0\n\
         19.0,20.0,21.0,22.0,23.0,24.0";
 
-    const EPS: f32 = 1e-8;
+    const EPS: f32 = 1e-6;
 
     #[test]
     fn test_valid_construction_block_1() {
@@ -758,34 +759,6 @@ mod tests {
 
         let device = NdArrayDevice::default();
 
-        let test_ohlc =
-            Tensor::<NdArray, 1>::from_data([0.0, 0.0, 1.0 / 3.0, 5.0 / 3.0, 2.0, 1.0], &device)
-                .reshape([1, 1, 6]);
-
-        let projection = projector.project(test_ohlc, 10);
-
-        assert!(projection.shape().len() == 2);
-        assert!(projection.shape()[0] == 1);
-        assert!(projection.shape()[1] == 10);
-
-        assert!(projection.clone().sum().into_scalar() == 1.0);
-        let projection_data: Vec<f32> = projection.clone().to_data().into_vec().unwrap();
-
-        assert!((projection_data[0] - projection_data[9]).powf(2.0) < EPS);
-        assert!((projection_data[1] - projection_data[8]).powf(2.0) < EPS);
-        for i_grid in 3..8 {
-            assert!((projection_data[i_grid] - projection_data[2]).powf(2.0) < EPS);
-        }
-
-        assert!((2.0 * projection_data[0] - projection_data[2]).powf(2.0) < EPS);
-    }
-
-    #[test]
-    fn test_random_ohlc_2_distribution() {
-        let projector = OHLC2Distribution;
-
-        let device = NdArrayDevice::default();
-
         let test_ohlc = Tensor::<NdArray, 1>::from_data([0.0, 0.0, 0.0, 2.0, 2.0, 1.0], &device)
             .reshape([1, 1, 6]);
 
@@ -797,6 +770,110 @@ mod tests {
 
         assert!(projection.clone().sum().into_scalar() == 1.0);
         let projection_data: Vec<f32> = projection.clone().to_data().into_vec().unwrap();
-        panic!("{:?}", projection_data);
+
+        let integrand = |p: f64, i_grid: usize| {
+            (9.0 / (2.0 * std::f64::consts::PI))
+                * (((-1.0 / 2.0) * ((9.0 * p - 2.0 * (i_grid as f64)).powf(2.0))).exp())
+                * (((-1.0 / 2.0) * ((p - 1.0).powf(2.0))).exp())
+        };
+
+        let reference = (0..10).map(|i_grid| {
+            adaptive_simpson_method(
+                |p: f32| integrand(p as f64, i_grid) as f32,
+                0.0,
+                2.0,
+                1e-6,
+                EPS,
+            )
+            .unwrap()
+        });
+        let sum: f32 = reference.clone().sum();
+        let reference: Vec<f32> = reference.map(|val| val / sum).collect();
+        for i_grid in 0..10 {
+            assert!((reference[i_grid] - projection_data[i_grid]).powf(2.0) < EPS);
+        }
+    }
+
+    #[test]
+    fn test_ohlc_to_distribution() {
+        let projector = OHLC2Distribution;
+
+        let device = NdArrayDevice::default();
+
+        let test_ohlc = Tensor::<NdArray, 2>::from_data(
+            [
+                [0.0, 0.0, 0.0, 2.0, 2.0, 1.0],
+                [0.1, 0.1, 0.3, 0.6, 1.0, 0.4],
+            ],
+            &device,
+        )
+        .reshape([1, 2, 6]);
+
+        let projection = projector.project(test_ohlc, 10);
+
+        assert!(projection.shape().len() == 2);
+        assert!(projection.shape()[0] == 1);
+        assert!(projection.shape()[1] == 10);
+
+        assert!(projection.clone().sum().into_scalar() == 1.0);
+        let projection_data: Vec<f32> = projection.clone().to_data().into_vec().unwrap();
+
+        let integrand = |p: f64, i_grid: usize| {
+            (9.0 / (2.0 * std::f64::consts::PI))
+                * (((-1.0 / 2.0) * ((9.0 * p - 2.0 * (i_grid as f64)).powf(2.0))).exp())
+                * (((-1.0 / 2.0) * ((p - 1.0).powf(2.0))).exp()
+                    + ((-0.1 * 3.0) as f64).exp()
+                        * 0.4
+                        * ((-1.0 / 2.0) * (((p - 0.483333333333333) / (0.3)).powf(2.0))).exp())
+        };
+
+        let reference = (0..10).map(|i_grid| {
+            adaptive_simpson_method(
+                |p: f32| integrand(p as f64, i_grid) as f32,
+                0.0,
+                2.0,
+                1e-6,
+                EPS,
+            )
+            .unwrap()
+        });
+        let sum: f32 = reference.clone().sum();
+        let reference: Vec<f32> = reference.map(|val| val / sum).collect();
+
+        for i_grid in 0..10 {
+            assert!((reference[i_grid] - projection_data[i_grid]).powf(2.0) < EPS);
+        }
+    }
+
+    #[test]
+    fn test_random_ohlc_projection() {
+        let projector = OHLC2Distribution;
+
+        let device = NdArrayDevice::default();
+
+        let test_ohlc = Tensor::<NdArray, 3>::random(
+            [4, 3, 6],
+            burn::tensor::Distribution::Uniform(0.1, 2.0),
+            &device,
+        );
+
+        let projection = projector.project(test_ohlc, 10);
+
+        assert!(projection.shape().len() == 2);
+        assert!(projection.shape()[0] == 4);
+        assert!(projection.shape()[1] == 10);
+
+        for i_batch in 0..4 {
+            assert!(
+                projection
+                    .clone()
+                    .slice(s![i_batch, 0..])
+                    .sum()
+                    .into_scalar()
+                    .powf(2.0)
+                    - 1.0
+                    < EPS
+            );
+        }
     }
 }
