@@ -4,6 +4,7 @@ use burn::nn::modules::attention::{MhaInput, MultiHeadAttention, MultiHeadAttent
 use burn::nn::modules::conv::{Conv1d, Conv1dConfig};
 use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, Relu};
 use burn::tensor::Tensor;
+use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
 
 #[derive(Module, Debug)]
@@ -250,9 +251,12 @@ pub struct Rooney<B: Backend> {
 impl<B: Backend> Rooney<B> {
     pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
         let buffer = self.ingress.forward(input.transpose()).transpose();
-        self.stacks
-            .iter()
-            .fold(buffer, |acc, stack| stack.forward(acc))
+        softmax(
+            self.stacks
+                .iter()
+                .fold(buffer, |acc, stack| stack.forward(acc)),
+            2,
+        )
     }
 }
 
@@ -296,6 +300,7 @@ impl RooneyConfig {
             .collect();
         Rooney {
             ingress: ExpansionLayerConfig::new(self.input_n_channels, self.latent_size)
+                .with_n_stacks(self.n_expansion_stacks)
                 .with_kernel_size(self.kernel_size)
                 .with_dropout(self.dropout.clone())
                 .build(device),
