@@ -210,6 +210,12 @@ impl OHLC2Distribution {
             .repeat_dim(0, prices.shape()[0]),
         );
 
+        // Add epsilon to delta values to avoid zero division
+        let anchors = anchors
+            + Tensor::<B, 3>::from_data([[[0.0, 1e-16]]], &prices.clone().device())
+                .repeat_dim(1, prices.shape()[1])
+                .repeat_dim(0, prices.shape()[0]);
+
         let a = (grid_size - 1) as f64;
         let c = anchors.clone().slice(s![0.., 0.., 1]).recip();
         let d = anchors.clone().slice(s![0.., 0.., 0]).mul(c.clone());

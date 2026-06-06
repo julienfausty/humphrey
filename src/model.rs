@@ -2,7 +2,7 @@ use burn::config::Config;
 use burn::module::Module;
 use burn::nn::modules::attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig};
 use burn::nn::modules::conv::{Conv1d, Conv1dConfig};
-use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, Relu};
+use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig1d, Relu};
 use burn::tensor::Tensor;
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
@@ -92,6 +92,7 @@ impl ExpansionLayerConfig {
                             projection_chain[i_chain + 1],
                             self.kernel_size.clone(),
                         )
+                        .with_padding(PaddingConfig1d::Same)
                         .init(device),
                         Relu::new(),
                     )
@@ -165,6 +166,7 @@ impl DistillationLayerConfig {
                             projection_chain[i_chain + 1].1,
                             self.kernel_size.clone(),
                         )
+                        .with_padding(PaddingConfig1d::Same)
                         .init(device),
                         Relu::new(),
                     )

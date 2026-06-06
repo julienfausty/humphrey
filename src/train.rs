@@ -38,7 +38,7 @@ impl<B: AutodiffBackend> TrainStep for Rooney<B> {
             grid_size,
         );
 
-        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Auto);
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
 
         let output = RegressionOutput::new(loss, pass, targets);
 
@@ -132,7 +132,7 @@ fn main() -> Result<(), String> {
         .with_use_only(0.0005)
         .with_window_size(window_size);
 
-    let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 10)
+    let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 16)
         .with_n_attention_heads(1)
         .with_n_expansion_stacks(1)
         .with_n_thinking_stacks(1)
