@@ -4,7 +4,7 @@ use burn::data::dataloader::{DataLoader, DataLoaderBuilder};
 use burn::data::dataset::Dataset;
 use burn::data::dataset::transform::{Mapper, MapperDataset, SelectionDataset};
 use burn::prelude::s;
-use burn::tensor::backend::Backend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Tensor, TensorData};
 
 use rand::{RngExt, SeedableRng, rngs::ChaCha8Rng};
@@ -66,7 +66,7 @@ impl<B: Backend> OHLCDataset<B> {
     pub fn new<Src: Read>(
         block_size: usize,
         source: Src,
-        device: &<B as Backend>::Device,
+        device: &B::Device,
     ) -> Result<OHLCDataset<B>, String> {
         let raw = match parse(source) {
             Ok(raw) => raw,
@@ -107,7 +107,7 @@ impl<B: Backend> Dataset<OHLCItem<B>> for OHLCDataset<B> {
     }
 
     fn len(&self) -> usize {
-        self.loaded.shape().dims[0] - 2 * self.block_size + 1
+        self.loaded.shape()[0] - 2 * self.block_size + 1
     }
 }
 
@@ -149,6 +149,17 @@ impl<B: Backend> Mapper<OHLCItem<B>, OHLCItem<B>> for NormalizeOHLCItem {
     }
 }
 
+pub struct ToInnerBackend;
+
+impl<B: AutodiffBackend> Mapper<OHLCItem<B>, OHLCItem<B::InnerBackend>> for ToInnerBackend {
+    fn map(&self, item: &OHLCItem<B>) -> OHLCItem<B::InnerBackend> {
+        OHLCItem {
+            block: item.block.clone().inner(),
+            next: item.next.clone().inner(),
+        }
+    }
+}
+
 /// A batch of OHLCItems
 #[derive(Debug, Clone)]
 pub struct OHLCBatch<B: Backend> {
@@ -166,6 +177,108 @@ impl<B: Backend> Batcher<B, OHLCItem<B>, OHLCBatch<B>> for OHLCBatcher {
             blocks: Tensor::stack(items.iter().map(|item| item.block.clone()).collect(), 0),
             nexts: Tensor::stack(items.iter().map(|item| item.next.clone()).collect(), 0),
         }
+    }
+}
+
+// Implements a projection operation from normalized OHLC data to price distribution between (0, 2). Projection takes into account volumes and discount from t = 0.0
+pub struct OHLC2Distribution;
+
+impl OHLC2Distribution {
+    pub fn project<B: Backend>(&self, ohlc: Tensor<B, 3>, grid_size: usize) -> Tensor<B, 2> {
+        let prices = ohlc
+            .clone()
+            .slice(s![0.., 0.., 1..5])
+            .sort(2)
+            .clamp(0.0, 2.0);
+        let time_discount = ohlc
+            .clone()
+            .slice(s![0.., 0.., 0])
+            .div_scalar(-1.0 / 3.0)
+            .exp();
+        let volumes = ohlc.clone().slice(s![0.., 0.., 5]);
+
+        let anchors = prices.clone().matmul(
+            Tensor::<B, 3>::from_data(
+                [[
+                    [1.0 / 6.0, -1.0 / 4.0],
+                    [1.0 / 3.0, -1.0 / 4.0],
+                    [1.0 / 3.0, 1.0 / 4.0],
+                    [1.0 / 6.0, 1.0 / 4.0],
+                ]],
+                &prices.clone().device(),
+            )
+            .repeat_dim(0, prices.shape()[0]),
+        );
+
+        // Add epsilon to delta values to avoid zero division
+        let anchors = anchors
+            + Tensor::<B, 3>::from_data([[[0.0, 1e-16]]], &prices.clone().device())
+                .repeat_dim(1, prices.shape()[1])
+                .repeat_dim(0, prices.shape()[0]);
+
+        let a = (grid_size - 1) as f64;
+        let c = anchors.clone().slice(s![0.., 0.., 1]).recip();
+        let d = anchors.clone().slice(s![0.., 0.., 0]).mul(c.clone());
+
+        let a2c2 = c.clone().powf_scalar(2.0) + a.powf(2.0);
+
+        let integral_measure = a2c2
+            .clone()
+            .mul_scalar(8.0 * std::f64::consts::PI)
+            .sqrt()
+            .recip()
+            .mul_scalar(a)
+            .mul(time_discount)
+            .mul(volumes);
+
+        let exponential_term = (0..grid_size).fold(
+            Tensor::<B, 3>::zeros(
+                [prices.shape()[0], prices.shape()[1], grid_size],
+                &prices.device(),
+            ),
+            |acc, i_grid| {
+                let b = 2.0 * (i_grid as f64);
+                let contribution = (c.clone().mul_scalar(b) - d.clone().mul_scalar(a))
+                    .powf_scalar(2.0)
+                    .div(a2c2.clone().mul_scalar(2))
+                    .neg()
+                    .exp();
+                acc.clone().slice_assign(
+                    s![0.., 0.., i_grid],
+                    contribution + acc.clone().slice(s![0.., 0.., i_grid]),
+                )
+            },
+        );
+
+        let erf_term = (0..grid_size).fold(
+            Tensor::<B, 3>::zeros(
+                [prices.shape()[0], prices.shape()[1], grid_size],
+                &prices.device(),
+            ),
+            |acc, i_grid| {
+                let b = 2.0 * (i_grid as f64);
+                let sqrt_two_a2c2 = a2c2.clone().mul_scalar(2.0).sqrt();
+                let ab_plus_cd = c.clone().mul(d.clone()) + a * b;
+                let contribution = (a2c2.clone().mul_scalar(2.0) - ab_plus_cd.clone())
+                    .div(sqrt_two_a2c2.clone())
+                    .erf()
+                    - ab_plus_cd.clone().neg().div(sqrt_two_a2c2.clone()).erf();
+                acc.clone().slice_assign(
+                    s![0.., 0.., i_grid],
+                    contribution + acc.clone().slice(s![0.., 0.., i_grid]),
+                )
+            },
+        );
+
+        let convolution = integral_measure
+            .repeat_dim(2, grid_size)
+            .mul(exponential_term)
+            .mul(erf_term);
+
+        let convolution = convolution.sum_dim(1).reshape([0, -1]);
+        convolution
+            .clone()
+            .div(convolution.clone().sum_dim(1).repeat_dim(1, grid_size))
     }
 }
 
@@ -189,14 +302,14 @@ pub struct DataConfig {
 impl DataConfig {
     /// Method for coalescing the builder pattern into the train and test data (respectively)
     /// User must provide a readable source formatted in McZielinski CSV style
-    pub fn build<R: Read, B: Backend>(
+    pub fn build<R: Read, B: AutodiffBackend>(
         &self,
         source: R,
         device: &B::Device,
     ) -> Result<
         (
             Arc<dyn DataLoader<B, OHLCBatch<B>>>,
-            Arc<dyn DataLoader<B, OHLCBatch<B>>>,
+            Arc<dyn DataLoader<B::InnerBackend, OHLCBatch<B::InnerBackend>>>,
         ),
         String,
     > {
@@ -249,7 +362,10 @@ impl DataConfig {
             .shuffle(self.seed.clone())
             .num_workers(self.num_workers.clone())
             .build(SelectionDataset::from_indices_unchecked(
-                MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem),
+                MapperDataset::new(
+                    MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem),
+                    ToInnerBackend,
+                ),
                 unroll(test_blocks),
             ));
 
@@ -263,6 +379,7 @@ mod tests {
     use super::*;
 
     use burn::backend::{NdArray, ndarray::NdArrayDevice};
+    use integrate::adaptive_quadrature::adaptive_simpson_method;
 
     const VALID_TEST_STRING: &'static str = "\
         Timestamp,Low,Open,Close,High,Volume\n\
@@ -270,6 +387,8 @@ mod tests {
         7.0,8.0,9.0,10.0,11.0,12.0\n\
         13.0,14.0,15.0,16.0,17.0,18.0\n\
         19.0,20.0,21.0,22.0,23.0,24.0";
+
+    const EPS: f32 = 1e-6;
 
     #[test]
     fn test_valid_construction_block_1() {
@@ -650,6 +769,130 @@ mod tests {
                     .equal(test_item.next.clone())
                     .all()
                     .into_scalar()
+            );
+        }
+    }
+
+    #[test]
+    fn test_simple_ohlc_2_distribution() {
+        let projector = OHLC2Distribution;
+
+        let device = NdArrayDevice::default();
+
+        let test_ohlc = Tensor::<NdArray, 1>::from_data([0.0, 0.0, 0.0, 2.0, 2.0, 1.0], &device)
+            .reshape([1, 1, 6]);
+
+        let projection = projector.project(test_ohlc, 10);
+
+        assert!(projection.shape().len() == 2);
+        assert!(projection.shape()[0] == 1);
+        assert!(projection.shape()[1] == 10);
+
+        assert!(projection.clone().sum().into_scalar() == 1.0);
+        let projection_data: Vec<f32> = projection.clone().to_data().into_vec().unwrap();
+
+        let integrand = |p: f64, i_grid: usize| {
+            (9.0 / (2.0 * std::f64::consts::PI))
+                * (((-1.0 / 2.0) * ((9.0 * p - 2.0 * (i_grid as f64)).powf(2.0))).exp())
+                * (((-1.0 / 2.0) * ((p - 1.0).powf(2.0))).exp())
+        };
+
+        let reference = (0..10).map(|i_grid| {
+            adaptive_simpson_method(
+                |p: f32| integrand(p as f64, i_grid) as f32,
+                0.0,
+                2.0,
+                1e-6,
+                EPS,
+            )
+            .unwrap()
+        });
+        let sum: f32 = reference.clone().sum();
+        let reference: Vec<f32> = reference.map(|val| val / sum).collect();
+        for i_grid in 0..10 {
+            assert!((reference[i_grid] - projection_data[i_grid]).powf(2.0) < EPS);
+        }
+    }
+
+    #[test]
+    fn test_ohlc_to_distribution() {
+        let projector = OHLC2Distribution;
+
+        let device = NdArrayDevice::default();
+
+        let test_ohlc = Tensor::<NdArray, 2>::from_data(
+            [
+                [0.0, 0.0, 0.0, 2.0, 2.0, 1.0],
+                [0.1, 0.1, 0.3, 0.6, 1.0, 0.4],
+            ],
+            &device,
+        )
+        .reshape([1, 2, 6]);
+
+        let projection = projector.project(test_ohlc, 10);
+
+        assert!(projection.shape().len() == 2);
+        assert!(projection.shape()[0] == 1);
+        assert!(projection.shape()[1] == 10);
+
+        assert!(projection.clone().sum().into_scalar() == 1.0);
+        let projection_data: Vec<f32> = projection.clone().to_data().into_vec().unwrap();
+
+        let integrand = |p: f64, i_grid: usize| {
+            (9.0 / (2.0 * std::f64::consts::PI))
+                * (((-1.0 / 2.0) * ((9.0 * p - 2.0 * (i_grid as f64)).powf(2.0))).exp())
+                * (((-1.0 / 2.0) * ((p - 1.0).powf(2.0))).exp()
+                    + ((-0.1 * 3.0) as f64).exp()
+                        * 0.4
+                        * ((-1.0 / 2.0) * (((p - 0.483333333333333) / (0.3)).powf(2.0))).exp())
+        };
+
+        let reference = (0..10).map(|i_grid| {
+            adaptive_simpson_method(
+                |p: f32| integrand(p as f64, i_grid) as f32,
+                0.0,
+                2.0,
+                1e-6,
+                EPS,
+            )
+            .unwrap()
+        });
+        let sum: f32 = reference.clone().sum();
+        let reference: Vec<f32> = reference.map(|val| val / sum).collect();
+
+        for i_grid in 0..10 {
+            assert!((reference[i_grid] - projection_data[i_grid]).powf(2.0) < EPS);
+        }
+    }
+
+    #[test]
+    fn test_random_ohlc_projection() {
+        let projector = OHLC2Distribution;
+
+        let device = NdArrayDevice::default();
+
+        let test_ohlc = Tensor::<NdArray, 3>::random(
+            [4, 3, 6],
+            burn::tensor::Distribution::Uniform(0.1, 2.0),
+            &device,
+        );
+
+        let projection = projector.project(test_ohlc, 10);
+
+        assert!(projection.shape().len() == 2);
+        assert!(projection.shape()[0] == 4);
+        assert!(projection.shape()[1] == 10);
+
+        for i_batch in 0..4 {
+            assert!(
+                projection
+                    .clone()
+                    .slice(s![i_batch, 0..])
+                    .sum()
+                    .into_scalar()
+                    .powf(2.0)
+                    - 1.0
+                    < EPS
             );
         }
     }
