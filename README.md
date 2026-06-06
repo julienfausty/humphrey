@@ -27,7 +27,7 @@ cargo build --release
 
 for running training:
 ```shell
-cargo run --release --bin train
+cargo run --release --bin train < your_ohlc_data.csv
 ```
 
 ## Data
@@ -72,6 +72,14 @@ Data is split by:
 This chunking operation is performed because the windowing of the dataset. If sampled randomly, the majority of portions of the dataset in the train set and test set will overlap. This would not make the test evaluation very trustworthy since the model sees a large portion of it during training. Chunking the dataset in this manner ensures that only the head and tail of chunks overlap between the train and test sets limiting this effect. The larger the block size chosen, the more this effect is mitigated but the less the entire dataset is sampled over the enitre time series.
 
 Data is batched for training and testing to parallelize and speed up the training process using a `batch_size` user provided parameter.
+
+## Model
+
+Rooney is a Transformer Encoder based model largely inspired from the seminal [Attention is all you need](https://arxiv.org/abs/1706.03762) paper. The model is composed of two different stages:
+* Ingress / Expansion: A convolutional stage (multiple convolutional layers) that expand the OHLC data into learned features useful for predicting the next distribution of prices.
+* Reasoning: A stage composed of multiple stacks with each stack defined by a transformer encoder block with multiple layers followed by a distillation block that reduces the dimensionality of the data. The goal is to have the model reason on the features generated in the expansion stage and pipe the insights to a prediction of the next period's price distribution. The distillation block is comprised of both feed-forward layers for reducing the sequence length in a learned manner and convolutional layers for reducing the feature space.
+
+The final output of the reasoning stage goes through a `softmax` operation in order to generate the qualities of a probability distribution.
 
 ## Evaluation
 
