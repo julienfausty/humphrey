@@ -1,50 +1,13 @@
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::modules::attention::{MhaInput, MultiHeadAttention, MultiHeadAttentionConfig};
 use burn::nn::modules::conv::{Conv1d, Conv1dConfig};
+use burn::nn::modules::transformer::{
+    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
+};
 use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig1d, Relu};
 use burn::tensor::Tensor;
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
-
-#[derive(Module, Debug)]
-pub struct ReasoningLayer<B: Backend> {
-    stacks: Vec<(Linear<B>, Relu)>,
-    dropout: Dropout,
-}
-
-impl<B: Backend> ReasoningLayer<B> {
-    pub fn forward<const D: usize>(&self, input: Tensor<B, D>) -> Tensor<B, D> {
-        self.stacks.iter().fold(input, |acc, stack| {
-            self.dropout.forward(stack.1.forward(stack.0.forward(acc)))
-        })
-    }
-}
-
-#[derive(Config, Debug)]
-pub struct ReasoningLayerConfig {
-    latent_size: usize,
-    #[config(default = 4)]
-    n_stacks: usize,
-    #[config(default = 0.1)]
-    dropout: f64,
-}
-
-impl ReasoningLayerConfig {
-    pub fn build<B: Backend>(&self, device: &B::Device) -> ReasoningLayer<B> {
-        ReasoningLayer {
-            stacks: (0..self.n_stacks)
-                .map(|_| {
-                    (
-                        LinearConfig::new(self.latent_size, self.latent_size).init(device),
-                        Relu::new(),
-                    )
-                })
-                .collect(),
-            dropout: DropoutConfig::new(self.dropout).init(),
-        }
-    }
-}
 
 #[derive(Module, Debug)]
 pub struct ExpansionLayer<B: Backend> {
@@ -179,8 +142,7 @@ impl DistillationLayerConfig {
 
 #[derive(Module, Debug)]
 pub struct ThinkingLayer<B: Backend> {
-    attention: MultiHeadAttention<B>,
-    reason: ReasoningLayer<B>,
+    encoder: TransformerEncoder<B>,
     distill: DistillationLayer<B>,
     dropout: Dropout,
 }
@@ -188,12 +150,9 @@ pub struct ThinkingLayer<B: Backend> {
 impl<B: Backend> ThinkingLayer<B> {
     pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
         let buffer = self
-            .attention
-            .forward(MhaInput::self_attn(input))
-            .context
+            .encoder
+            .forward(TransformerEncoderInput::new(input))
             .transpose();
-        let buffer = self.dropout.forward(buffer);
-        let buffer = self.reason.forward(buffer);
         let buffer = self.dropout.forward(buffer);
         let buffer = self.distill.forward(buffer);
         self.dropout.forward(buffer).transpose()
@@ -222,13 +181,14 @@ pub struct ThinkingLayerConfig {
 impl ThinkingLayerConfig {
     pub fn build<B: Backend>(&self, device: &B::Device) -> ThinkingLayer<B> {
         ThinkingLayer {
-            attention: MultiHeadAttentionConfig::new(self.input_n_channels, self.n_attention_heads)
-                .with_dropout(self.dropout.clone())
-                .init(device),
-            reason: ReasoningLayerConfig::new(self.input_size)
-                .with_n_stacks(self.n_reasoning_layers)
-                .with_dropout(self.dropout.clone())
-                .build(device),
+            encoder: TransformerEncoderConfig::new(
+                self.input_n_channels,
+                self.input_size,
+                self.n_attention_heads,
+                self.n_reasoning_layers,
+            )
+            .with_dropout(self.dropout)
+            .init(device),
             distill: DistillationLayerConfig::new(
                 self.input_size,
                 self.input_n_channels,

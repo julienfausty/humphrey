@@ -1,7 +1,7 @@
 use burn::backend::{Autodiff, Wgpu, wgpu::WgpuDevice};
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::loss::{MseLoss, Reduction};
+use burn::nn::loss::{KLDivLossConfig, Reduction};
 use burn::optim::AdamConfig;
 use burn::prelude::s;
 use burn::record::CompactRecorder;
@@ -38,7 +38,11 @@ impl<B: AutodiffBackend> TrainStep for Rooney<B> {
             grid_size,
         );
 
-        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
+        let loss = KLDivLossConfig::new().init().forward(
+            pass.clone(),
+            targets.clone(),
+            Reduction::BatchMean,
+        );
 
         let output = RegressionOutput::new(loss, pass, targets);
 
@@ -65,7 +69,11 @@ impl<B: Backend> InferenceStep for Rooney<B> {
             grid_size,
         );
 
-        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Auto);
+        let loss = KLDivLossConfig::new().init().forward(
+            pass.clone(),
+            targets.clone(),
+            Reduction::BatchMean,
+        );
 
         RegressionOutput::new(loss, pass, targets)
     }
@@ -129,19 +137,22 @@ fn main() -> Result<(), String> {
     let window_size = 64;
 
     let data_config = DataConfig::new()
-        .with_use_only(0.0005)
+        .with_use_only(0.05)
         .with_window_size(window_size);
 
-    let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 16)
-        .with_n_attention_heads(1)
-        .with_n_expansion_stacks(1)
+    let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 32)
+        .with_latent_size(128)
+        .with_n_expansion_stacks(4)
         .with_n_thinking_stacks(1)
-        .with_n_reasoning_layers(1)
-        .with_n_distillation_layers(1);
+        .with_n_attention_heads(4)
+        .with_n_reasoning_layers(2)
+        .with_n_distillation_layers(2);
 
     train::<AutodiffBackendInUse>(
         artifact_dir,
-        TrainingConfig::new(data_config, model_config, AdamConfig::new()).with_num_epochs(2),
+        TrainingConfig::new(data_config, model_config, AdamConfig::new())
+            .with_num_epochs(5)
+            .with_learning_rate(1e-3),
         device.clone(),
     );
 
