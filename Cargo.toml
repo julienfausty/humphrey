@@ -7,6 +7,7 @@ edition = "2024"
 burn = { version = "0.21.0", features = ["cuda", "ndarray", "train", "tui", "wgpu", "metrics"] }
 csv = "1.4.0"
 kraken-async-rs = "0.14.0"
+plotters = "0.3.7"
 rand = { version = "0.10.1", features = ["chacha"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = "1.50.0"
@@ -21,3 +22,7 @@ path="src/fetch.rs"
 [[bin]]
 name="train"
 path="src/train.rs"
+
+[[bin]]
+name="plots"
+path="src/plots.rs"
