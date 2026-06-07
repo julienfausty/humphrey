@@ -130,10 +130,10 @@ impl<B: Backend> Mapper<OHLCItem<B>, OHLCItem<B>> for NormalizeOHLCItem {
         let block_vols = block_vols.div_scalar(max_vol.clone());
         let next_vols = item.next.clone().slice(s![0.., 5]).div_scalar(max_vol);
 
-        let high = item.block.clone().slice(s![0.., 4]).max().into_scalar();
+        let close = item.block.clone().slice(s![-1, 3]).into_scalar();
 
-        let block_prices = (item.block.clone().slice(s![0.., 1..5])).div_scalar(high.clone());
-        let next_prices = (item.next.clone().slice(s![0.., 1..5])).div_scalar(high.clone());
+        let block_prices = (item.block.clone().slice(s![0.., 1..5])).div_scalar(close.clone());
+        let next_prices = (item.next.clone().slice(s![0.., 1..5])).div_scalar(close.clone());
 
         let block = item.block.clone().zeros_like();
         let next = item.next.clone().zeros_like();
@@ -561,14 +561,14 @@ mod tests {
             block: Tensor::<NdArray, 2>::from_data(
                 [
                     [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-                    [6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                    [6.0, 7.0, 8.0, 10.0, 9.0, 11.0],
                 ],
                 &device,
             ),
             next: Tensor::<NdArray, 2>::from_data(
                 [
                     [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-                    [6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                    [6.0, 7.0, 8.0, 10.0, 9.0, 11.0],
                 ],
                 &device,
             ),
@@ -583,7 +583,7 @@ mod tests {
                 .equal(Tensor::<NdArray, 2>::from_data(
                     [
                         [0.0, 0.1, 0.2, 0.3, 0.4, 5.0 / 11.0],
-                        [1.0, 0.7, 0.8, 0.9, 1.0, 1.0],
+                        [1.0, 0.7, 0.8, 1.0, 0.9, 1.0],
                     ],
                     &device,
                 ))
@@ -597,7 +597,7 @@ mod tests {
                 .equal(Tensor::<NdArray, 2>::from_data(
                     [
                         [0.0, 0.1, 0.2, 0.3, 0.4, 5.0 / 11.0],
-                        [1.0, 0.7, 0.8, 0.9, 1.0, 1.0],
+                        [1.0, 0.7, 0.8, 1.0, 0.9, 1.0],
                     ],
                     &device,
                 ))
@@ -615,7 +615,7 @@ mod tests {
                     [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
                     [6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
                     [12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
-                    [18.0, 19.0, 20.0, 21.0, 22.0, 23.0],
+                    [18.0, 19.0, 20.0, 22.0, 21.0, 23.0],
                 ],
                 &device,
             ),
@@ -624,7 +624,7 @@ mod tests {
                     [30.0, 31.0, 32.0, 33.0, 34.0, 35.0],
                     [36.0, 37.0, 38.0, 39.0, 40.0, 41.0],
                     [42.0, 43.0, 44.0, 45.0, 46.0, 47.0],
-                    [48.0, 49.0, 50.0, 51.0, 52.0, 53.0],
+                    [48.0, 49.0, 50.0, 52.0, 51.0, 53.0],
                 ],
                 &device,
             ),
@@ -662,7 +662,7 @@ mod tests {
                             16.0 / 22.0,
                             17.0 / 23.0
                         ],
-                        [1.0, 19.0 / 22.0, 20.0 / 22.0, 21.0 / 22.0, 1.0, 1.0],
+                        [1.0, 19.0 / 22.0, 20.0 / 22.0, 1.0, 21.0 / 22.0, 1.0],
                     ],
                     &device,
                 ))
@@ -703,8 +703,8 @@ mod tests {
                             48.0 / 18.0,
                             49.0 / 22.0,
                             50.0 / 22.0,
-                            51.0 / 22.0,
                             52.0 / 22.0,
+                            51.0 / 22.0,
                             53.0 / 23.0
                         ],
                     ],

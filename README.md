@@ -53,13 +53,14 @@ For training, the data is windowed (following a user defined window size) and ea
 ```math
 \begin{split}
 \tilde{t} &= \frac{(t - t_{start})}{(t_{end} - t_{start})}\\
-\tilde{p} &= \frac{p}{p_{max}}\\
+\tilde{p} &= \frac{p}{p_{close}}\\
 \tilde{v} &= \frac{v}{v_{max}}
 \end{split}
 ```
 
 where:
-* $t$, $p$ and $v$ are time, price (low, high, open and close together) and volume respectively, and
+* $t$, $p$ and $v$ are time, price (low, high, open and close together) and volume respectively,
+* $p_{close}$ is the close of the asset at the end of the block, and
 * tilded quantities are normalized (in the rest of the document, we will only use normalized quantities unless specified and so the tilde is omitted)
 
 Each item passed to training contains an OHLC data window and the next unoverlapping window normalized with the values from the current window for evaluating loss and predictive power.
