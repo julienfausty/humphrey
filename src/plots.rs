@@ -15,51 +15,79 @@ use data::{NormalizeOHLCItem, OHLC2Distribution, OHLCBatcher, OHLCDataset, OHLCI
 
 const ASSET_DIR: &'static str = "assets/";
 
-fn main() -> Result<(), String> {
-    let device = NdArrayDevice::default();
-
-    println!("Reading dataset...");
-    let base_dataset = OHLCDataset::<NdArray>::new::<Stdin>(64, stdin(), &device).unwrap();
-    let dataset: MapperDataset<_, _, OHLCItem<NdArray>> =
-        MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem);
-
-    let dset_index = base_dataset.len() - 1;
+fn latest_distributions(
+    dataset: &MapperDataset<OHLCDataset<NdArray>, NormalizeOHLCItem, OHLCItem<NdArray>>,
+) -> Result<(), String> {
+    let dset_index = dataset.len() - 1;
+    let price_range = (0.95, 1.05);
 
     println!("Preparing data...");
-    let one_batch = OHLCBatcher {}.batch(vec![dataset.get(dset_index).unwrap()], &device);
+    let item = dataset.get(dset_index).unwrap();
+    let one_batch = OHLCBatcher {}.batch(vec![item.clone()], &item.block.device());
 
     let grid_size = 512;
 
+    let price_width = price_range.1 - price_range.0;
+
     let prices = (0..grid_size)
-        .map(|i_grid| (i_grid as f64) / ((grid_size - 1) as f64))
+        .map(|i_grid| price_width * (i_grid as f64) / ((grid_size - 1) as f64) + price_range.0)
         .collect::<Vec<_>>();
 
     let projector = OHLC2Distribution;
-    let block_distribution: Vec<f32> = projector
+    let block_weights: Vec<f32> = projector
         .project(
             one_batch.blocks.clone().slice_assign(
                 s![0.., 0.., 0],
-                one_batch.blocks.clone().slice(s![0.., 0.., 0]) - 1.0,
+                1.0 - one_batch.blocks.clone().slice(s![0.., 0.., 0]),
             ),
             grid_size,
+            price_range,
         )
         .reshape([grid_size])
         .to_data()
         .to_vec()
         .unwrap();
 
-    let next_distribution: Vec<f32> = projector
+    let next_weights: Vec<f32> = projector
         .project(
             one_batch.nexts.clone().slice_assign(
                 s![0.., 0.., 0],
                 one_batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
             ),
             grid_size,
+            price_range,
         )
         .reshape([grid_size])
         .to_data()
         .to_vec()
         .unwrap();
+
+    let distribution = |x: f64, weights: &Vec<f32>| -> f64 {
+        let grid_m1 = grid_size as f64 - 1.0;
+        (0..grid_size)
+            .map(|i_grid| {
+                (weights[i_grid] as f64)
+                    * (2.0 * grid_m1 / (price_width * (2.0 * PI).sqrt()))
+                    * ((-1.0 / 2.0)
+                        * ((x - price_range.0) * 2.0 * grid_m1 / price_width
+                            - 2.0 * (i_grid as f64))
+                            .powf(2.0))
+                    .exp()
+            })
+            .sum()
+    };
+
+    let block_distribution: Vec<f64> = prices
+        .clone()
+        .into_iter()
+        .map(|val| distribution(val, &block_weights))
+        .collect();
+
+    let next_distribution: Vec<f64> = prices
+        .clone()
+        .into_iter()
+        .map(|val| distribution(val, &next_weights))
+        .collect();
 
     println!("Plotting...");
 
@@ -78,43 +106,48 @@ fn main() -> Result<(), String> {
         .set_label_area_size(LabelAreaPosition::Left, 40)
         .set_label_area_size(LabelAreaPosition::Bottom, 40)
         .caption("Latest Distribution Pair", ("monospace", 40))
-        .build_cartesian_2d(0.0..2.0, 0.0..max_probability)
+        .build_cartesian_2d(price_range.0..price_range.1, 0.0..(1.1 * max_probability))
         .unwrap();
 
     context.configure_mesh().draw().unwrap();
 
-    let distribution = |x: f64, weights: &Vec<f32>| -> f64 {
-        let grid_m1 = grid_size as f64 - 1.0;
-        (0..grid_size)
-            .map(|i_grid| {
-                (weights[i_grid] as f64)
-                    * (grid_m1 / (2.0 * PI).sqrt())
-                    * ((-1.0 / 2.0) * (x * grid_m1 - 2.0 * (i_grid as f64)).powf(2.0)).exp()
-            })
-            .sum()
-    };
-
-    let mut draw_distribution = |distro: Vec<f32>, color: RGBColor| {
+    let mut draw_distribution = |distro: Vec<f64>, color: RGBColor, label| {
         context
             .draw_series(
                 AreaSeries::new(
-                    std::iter::zip(
-                        prices.clone().into_iter(),
-                        prices
-                            .clone()
-                            .into_iter()
-                            .map(|val| distribution(val, &distro)),
-                    ),
+                    std::iter::zip(prices.clone().into_iter(), distro),
                     0.0,
                     &color.mix(0.2),
                 )
                 .border_style(&color),
             )
-            .unwrap();
+            .unwrap()
+            .label(label)
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &color));
     };
 
-    draw_distribution(block_distribution, BLUE);
-    draw_distribution(next_distribution, GREEN);
+    draw_distribution(block_distribution, BLUE, "Present");
+    draw_distribution(next_distribution, GREEN, "Future");
+
+    context
+        .configure_series_labels()
+        .border_style(&BLACK)
+        .background_style(&WHITE.mix(0.8))
+        .draw()
+        .unwrap();
+
+    Ok(())
+}
+
+fn main() -> Result<(), String> {
+    let device = NdArrayDevice::default();
+
+    println!("Reading dataset...");
+    let base_dataset = OHLCDataset::<NdArray>::new::<Stdin>(1024, stdin(), &device).unwrap();
+    let dataset: MapperDataset<_, _, OHLCItem<NdArray>> =
+        MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem);
+
+    latest_distributions(&dataset).expect("Failed to plot latest distributions");
 
     Ok(())
 }

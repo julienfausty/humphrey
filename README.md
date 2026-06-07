@@ -8,12 +8,12 @@ The goal of the analyst is to predict the asset price probablity distribution ov
 The output of the model should be a probablity density function:
 ```math
 \begin{split}
-  \phi: & [0, 2] \rightarrow [0, 1]\\
+  \phi: & [p_{min}, p_{max}] \rightarrow [0, 1]\\
      & \phi(p) = P(p | [t, t + \Delta t])
 \end{split}
 ```
 
-where `p` is a normalized price, `t` is a time coordinate and `P` is the probability density for that asset to be at price `p` over the provided time range.
+where `p` is a normalized price (with $(p_{min}, p_{max})$ the range of normalized prices considered), `t` is a time coordinate and `P` is the probability density for that asset to be at price `p` over the provided time range.
 
 
 ## Setup
@@ -86,7 +86,7 @@ The final output of the reasoning stage goes through a `softmax` operation in or
 
 The model will ultimately output a tensor with floating point values. The evaluation of the loss during training will ultimately determine the meaning of these values and how they evolve as the model improves.
 
-Given that the model is attempting to reconstruct a probability density function, we will use a set of basis functions $\mathbf{G} = \{g_{i}: [0, 2] \rightarrow [0, 1]\}$ such that:
+Given that the model is attempting to reconstruct a probability density function, we will use a set of basis functions $\mathbf{G} = \{g_{i}: [p_{min}, p_{max}] \rightarrow [0, 1]\}$ such that:
 ```math
 \phi(p) = \omega^{i}g_{i}(p)
 ```
@@ -94,18 +94,18 @@ where $\omega^{i}$ are the weights predicted by the model for a given OHLC windo
 
 Given the probabilistic nature of the problem, our first approach is to use gaussian kernel functions as the basis functions on a regular grid for the framing of the solution. As such, for a given grid size $N \gt 1$:
 ```math
-g_{i\in[0, N[}(p \in [0, 2]) = \dfrac{1}{\sigma\sqrt{2\pi}}e^{-\frac{(p - 2i/(N-1))^2}{2\sigma^2}}
+g_{i\in[0, N[}(p \in [p_{min}, p_{max}]) = \dfrac{1}{\sigma\sqrt{2\pi}}e^{-\frac{(p - (\frac{(p_{max} - p_{min})i}{(N-1)} + p_{min}))^2}{2\sigma^2}}
 ```
 
 where we choose $\sigma$ such that neighboring kernels overlap at one $\sigma$ intervals:
 
 ```math
-\sigma = \frac{1}{N-1}
+\sigma = \frac{p_{max} - p_{min}}{2(N-1)}
 ```
 
 such that:
 ```math
-g_{i\in[0, N[}(p \in [0, 2]) = \dfrac{N-1}{\sqrt{2\pi}}e^{-\frac{(p(N-1) - 2i)^2}{2}}
+g_{i\in[0, N[}(p \in [0, 2]) = \dfrac{2(N-1)}{(p_{max} - p_{min})\sqrt{2\pi}}e^{-\frac{((p - p_{min})\frac{2(N-1)}{p_{max} - p_{min}} - 2i )^2}{2}}
 ```
 
 In order to satisfy the constraints of a probability density function:
@@ -151,8 +151,8 @@ Given the structure given to the candlestick contribution, in order to calculate
 
 ```math
 \begin{split}
-\int_{0}^{2} \lambda_{\nu,\delta}(p) g_{i}(p) dp &= \int_{0}^{2} \dfrac{N-1}{\sqrt{2\pi}}e^{-\frac{(p(N-1) - 2i)^2}{2}} \dfrac{1}{\delta\sqrt{2\pi}}e^{-\frac{(p - \nu)^2}{2\delta^2}} dp\\
-&= \dfrac{N-1}{2\delta \pi} \int_{0}^{2} e^{-\frac{1}{2}\left((N-1)p - 2i\right)^2} e^{- \frac{1}{2}\left(\frac{1}{\delta}p - \frac{\nu}{\delta}\right)^2}
+\int_{0}^{2} \lambda_{\nu,\delta}(p) g_{i}(p) dp &= \int_{0}^{2} \dfrac{2(N-1)}{(p_{max} - p_{min})\sqrt{2\pi}}e^{-\frac{((p - p_{min})\frac{2(N-1)}{p_{max} - p_{min}} - 2i)^2}{2}} \dfrac{1}{\delta\sqrt{2\pi}}e^{-\frac{(p - \nu)^2}{2\delta^2}} dp\\
+&= \dfrac{(N-1)}{(p_{max} - p_{min})\delta \pi} \int_{0}^{2}e^{-\frac{((p - p_{min})\frac{2(N-1)}{p_{max} - p_{min}} - i)^2}{2}} e^{- \frac{1}{2}\left(\frac{1}{\delta}p - \frac{\nu}{\delta}\right)^2}
 \end{split}
 ```
 
@@ -162,26 +162,16 @@ Using the indefinite integral:
 \int e^{- \frac{1}{2} (ax - b)^2} e^{-\frac{1}{2} (cx - d)^2} dx = \sqrt{\frac{\pi}{2(a^2 + c^2)}} \exp\left(-\dfrac{(bc - ad)^2}{2(a^2 + c^2)}\right)\erf\left(\dfrac{(a^2 + c^2)x - (ab + cd)}{\sqrt{2(a^2 + c^2)}}\right),
 ```
 
-with $\erf$ the [error function](https://www.wolframalpha.com/input/?i=erf%28x%29%29%27),
-
-and replacing with quantities of interest:
+with $\erf$ the [error function](https://www.wolframalpha.com/input/?i=erf%28x%29%29%27), and the quantities of interest:
 
 ```math
 \begin{split}
-a &= (N-1)\\
-b &= 2i\\
+a &= \dfrac{2(N-1)}{p_{max} - p_{min}}\\
+b &= 2i + \frac{2p_{min}(N-1)}{p_{max} - p_{min}}\\
 c &= \delta^{-1}\\
 d &= \nu\delta^{-1}
 \end{split}
 ```
-
-we have that:
-```math
-\begin{split}
-\int_{0}^{2} \lambda_{\nu,\delta}(p) g_{i}(p) dp &=\frac{N-1}{\sqrt{8\pi((N-1)^2 + \delta^{-2})}} \exp\left(-\dfrac{(2i\delta^{-1} - (N-1)\nu\delta^{-1})^2}{2((N-1)^2 + \delta^{-2})}\right)\left[\erf\left(\dfrac{((N-1)^2 + \delta^{-2})p - ((N-1)2i + \nu\delta^{-2})}{\sqrt{2((N-1)^2 + \delta^{-2})}}\right)\right]_{0}^{2}
-\end{split}
-```
-
 computable directly for each grid point and $(o, h, l, c)$ candlestick.
 
 

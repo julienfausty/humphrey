@@ -36,6 +36,7 @@ impl<B: AutodiffBackend> TrainStep for Rooney<B> {
                 batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
             ),
             grid_size,
+            (0.95, 1.05),
         );
 
         let loss = KLDivLossConfig::new().init().forward(
@@ -67,6 +68,7 @@ impl<B: Backend> InferenceStep for Rooney<B> {
                 batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
             ),
             grid_size,
+            (0.95, 1.05),
         );
 
         let loss = KLDivLossConfig::new().init().forward(

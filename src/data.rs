@@ -184,12 +184,17 @@ impl<B: Backend> Batcher<B, OHLCItem<B>, OHLCBatch<B>> for OHLCBatcher {
 pub struct OHLC2Distribution;
 
 impl OHLC2Distribution {
-    pub fn project<B: Backend>(&self, ohlc: Tensor<B, 3>, grid_size: usize) -> Tensor<B, 2> {
+    pub fn project<B: Backend>(
+        &self,
+        ohlc: Tensor<B, 3>,
+        grid_size: usize,
+        price_range: (f64, f64),
+    ) -> Tensor<B, 2> {
         let prices = ohlc
             .clone()
             .slice(s![0.., 0.., 1..5])
             .sort(2)
-            .clamp(0.0, 2.0);
+            .clamp(price_range.0, price_range.1);
         let time_discount = ohlc
             .clone()
             .slice(s![0.., 0.., 0])
@@ -216,7 +221,9 @@ impl OHLC2Distribution {
                 .repeat_dim(1, prices.shape()[1])
                 .repeat_dim(0, prices.shape()[0]);
 
-        let a = (grid_size - 1) as f64;
+        let range_width = price_range.1 - price_range.0;
+        let a = 2.0 * ((grid_size - 1) as f64) / range_width;
+        let pre_b = a * price_range.0;
         let c = anchors.clone().slice(s![0.., 0.., 1]).recip();
         let d = anchors.clone().slice(s![0.., 0.., 0]).mul(c.clone());
 
@@ -237,7 +244,7 @@ impl OHLC2Distribution {
                 &prices.device(),
             ),
             |acc, i_grid| {
-                let b = 2.0 * (i_grid as f64);
+                let b = 2.0 * (i_grid as f64) + pre_b;
                 let contribution = (c.clone().mul_scalar(b) - d.clone().mul_scalar(a))
                     .powf_scalar(2.0)
                     .div(a2c2.clone().mul_scalar(2))
@@ -259,10 +266,12 @@ impl OHLC2Distribution {
                 let b = 2.0 * (i_grid as f64);
                 let sqrt_two_a2c2 = a2c2.clone().mul_scalar(2.0).sqrt();
                 let ab_plus_cd = c.clone().mul(d.clone()) + a * b;
-                let contribution = (a2c2.clone().mul_scalar(2.0) - ab_plus_cd.clone())
+                let contribution = (a2c2.clone().mul_scalar(price_range.1) - ab_plus_cd.clone())
                     .div(sqrt_two_a2c2.clone())
                     .erf()
-                    - ab_plus_cd.clone().neg().div(sqrt_two_a2c2.clone()).erf();
+                    - (a2c2.clone().mul_scalar(price_range.0) - ab_plus_cd.clone())
+                        .div(sqrt_two_a2c2.clone())
+                        .erf();
                 acc.clone().slice_assign(
                     s![0.., 0.., i_grid],
                     contribution + acc.clone().slice(s![0.., 0.., i_grid]),
@@ -782,7 +791,7 @@ mod tests {
         let test_ohlc = Tensor::<NdArray, 1>::from_data([0.0, 0.0, 0.0, 2.0, 2.0, 1.0], &device)
             .reshape([1, 1, 6]);
 
-        let projection = projector.project(test_ohlc, 10);
+        let projection = projector.project(test_ohlc, 10, (0.0, 2.0));
 
         assert!(projection.shape().len() == 2);
         assert!(projection.shape()[0] == 1);
@@ -829,7 +838,7 @@ mod tests {
         )
         .reshape([1, 2, 6]);
 
-        let projection = projector.project(test_ohlc, 10);
+        let projection = projector.project(test_ohlc, 10, (0.0, 2.0));
 
         assert!(projection.shape().len() == 2);
         assert!(projection.shape()[0] == 1);
@@ -877,7 +886,7 @@ mod tests {
             &device,
         );
 
-        let projection = projector.project(test_ohlc, 10);
+        let projection = projector.project(test_ohlc, 10, (0.0, 2.0));
 
         assert!(projection.shape().len() == 2);
         assert!(projection.shape()[0] == 4);
