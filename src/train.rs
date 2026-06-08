@@ -1,7 +1,7 @@
 use burn::backend::{Autodiff, Wgpu, wgpu::WgpuDevice};
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::loss::{KLDivLossConfig, Reduction};
+use burn::nn::loss::{MseLoss, Reduction};
 use burn::optim::AdamConfig;
 use burn::prelude::s;
 use burn::record::CompactRecorder;
@@ -39,11 +39,7 @@ impl<B: AutodiffBackend> TrainStep for Rooney<B> {
             (0.95, 1.05),
         );
 
-        let loss = KLDivLossConfig::new().init().forward(
-            pass.clone(),
-            targets.clone(),
-            Reduction::BatchMean,
-        );
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Sum);
 
         let output = RegressionOutput::new(loss, pass, targets);
 
@@ -71,11 +67,7 @@ impl<B: Backend> InferenceStep for Rooney<B> {
             (0.95, 1.05),
         );
 
-        let loss = KLDivLossConfig::new().init().forward(
-            pass.clone(),
-            targets.clone(),
-            Reduction::BatchMean,
-        );
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Sum);
 
         RegressionOutput::new(loss, pass, targets)
     }
@@ -136,10 +128,10 @@ fn main() -> Result<(), String> {
 
     let artifact_dir = "/tmp/rooney";
 
-    let window_size = 64;
+    let window_size = 128;
 
     let data_config = DataConfig::new()
-        .with_use_only(0.05)
+        .with_use_only(0.01)
         .with_window_size(window_size);
 
     let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 32)
@@ -154,7 +146,7 @@ fn main() -> Result<(), String> {
         artifact_dir,
         TrainingConfig::new(data_config, model_config, AdamConfig::new())
             .with_num_epochs(5)
-            .with_learning_rate(1e-3),
+            .with_learning_rate(1e-4),
         device.clone(),
     );
 

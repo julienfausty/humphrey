@@ -30,6 +30,12 @@ for running training:
 cargo run --release --bin train < your_ohlc_data.csv
 ```
 
+for plotting statistics from the dataset:
+```shell
+mkdir -p assets/images
+cargo run --release --bin plots < your_ohlc_data.csv
+```
+
 ## Data
 
 Data used to train the model can be found at: [https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data]
@@ -175,12 +181,7 @@ d &= \nu\delta^{-1}
 computable directly for each grid point and $(o, h, l, c)$ candlestick.
 
 
-The loss of the model can then computed using the [Kullback-Leibler divergence](https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence) for evaluating the non-similarity between probability distributions:
+The loss of the model can then computed using a classic mean squared error:
 ```math
-\mathcal{L}(\tilde{\phi}, \phi) = \int_{0}^{2} \tilde{\phi}\log\frac{\tilde{\phi}}{\phi} dp
-```
-
-For simplicity, a proxy of the loss is computed discretely with:
-```math
-L(\tilde{\phi}, \phi) = \sum_{i = 0}^{N-1} \tilde{\omega}_{i} \log\frac{\tilde{\omega}_{i}}{\omega{i}}
+\mathcal{L} = \sum_{i=0}^{N-1} (\omega^{i} - \tilde{\omega}^{i})^{2}
 ```
