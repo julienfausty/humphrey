@@ -17,7 +17,7 @@ const ASSET_DIR: &'static str = "assets/";
 const PRICE_RANGE: (f64, f64) = (0.95, 1.05);
 const PLOT_GRID_SIZE: usize = 512;
 const N_KERNELS: usize = 32;
-const BLOCK_SIZE: usize = 128;
+const BLOCK_SIZE: usize = 256;
 
 fn distribution(x: f64, weights: &Vec<f32>) -> f64 {
     let price_width = PRICE_RANGE.1 - PRICE_RANGE.0;
@@ -277,6 +277,109 @@ fn latest_n_differences(
     Ok(())
 }
 
+fn potential_edge_over_n(
+    dataset: &MapperDataset<OHLCDataset<NdArray>, NormalizeOHLCItem, OHLCItem<NdArray>>,
+) -> Result<(), String> {
+    println!("N Potential Edges:");
+    let n_distributions = 1000;
+
+    println!("Preparing data...");
+    let items =
+        (0..n_distributions).map(|i| dataset.get(dataset.len() - 1 - i * BLOCK_SIZE).unwrap());
+    let one_batches =
+        items.map(|item| OHLCBatcher {}.batch(vec![item.clone()], &item.block.device()));
+
+    let projector = OHLC2Distribution;
+    let block_weights: Vec<Vec<f32>> = one_batches
+        .clone()
+        .map(|one_batch| {
+            projector
+                .project(
+                    one_batch.blocks.clone().slice_assign(
+                        s![0.., 0.., 0],
+                        1.0 - one_batch.blocks.clone().slice(s![0.., 0.., 0]),
+                    ),
+                    N_KERNELS,
+                    PRICE_RANGE,
+                )
+                .reshape([N_KERNELS])
+                .to_data()
+                .to_vec()
+                .unwrap()
+        })
+        .collect();
+
+    let next_weights: Vec<Vec<f32>> = one_batches
+        .map(|one_batch| {
+            projector
+                .project(
+                    one_batch.nexts.clone().slice_assign(
+                        s![0.., 0.., 0],
+                        one_batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
+                    ),
+                    N_KERNELS,
+                    PRICE_RANGE,
+                )
+                .reshape([N_KERNELS])
+                .to_data()
+                .to_vec()
+                .unwrap()
+        })
+        .collect();
+
+    let diff_weights: Vec<Vec<f32>> =
+        std::iter::zip(block_weights.into_iter(), next_weights.into_iter())
+            .map(|(block, next)| {
+                std::iter::zip(block.into_iter(), next.into_iter())
+                    .map(|(w_block, w_next)| w_next - w_block)
+                    .collect()
+            })
+            .collect();
+
+    let diff_sums: Vec<f64> = diff_weights
+        .into_iter()
+        .map(|weights| weights.into_iter().map(|w| w.powf(2.0)).sum::<f32>() as f64)
+        .collect();
+
+    println!("Plotting...");
+
+    let image_location = format!("{ASSET_DIR}/images/latest_N_edge_potential.png");
+    let root_area = BitMapBackend::new(&image_location, (1200, 800)).into_drawing_area();
+
+    root_area.fill(&WHITE).unwrap();
+
+    let max_edge = diff_sums.iter().fold(0.0, |max, val| val.max(max)) as f64;
+    let min_edge = diff_sums.iter().fold(0.0, |min, val| val.min(min)) as f64;
+
+    let mut context = ChartBuilder::on(&root_area)
+        .set_label_area_size(LabelAreaPosition::Left, 40)
+        .set_label_area_size(LabelAreaPosition::Bottom, 40)
+        .caption(
+            format!("Edge potential over {n_distributions} items"),
+            ("monospace", 40),
+        )
+        .build_cartesian_2d(
+            0..diff_sums.len(),
+            (min_edge - 0.1 * min_edge.abs())..(1.1 * max_edge),
+        )
+        .unwrap();
+
+    context.configure_mesh().draw().unwrap();
+
+    context
+        .draw_series(
+            AreaSeries::new(
+                std::iter::zip(0..(diff_sums.len()), diff_sums),
+                0.0,
+                &GREEN.mix(0.2),
+            )
+            .border_style(&GREEN),
+        )
+        .unwrap();
+
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let device = NdArrayDevice::default();
 
@@ -287,6 +390,7 @@ fn main() -> Result<(), String> {
 
     latest_distributions(&dataset).expect("Failed to plot latest distributions");
     latest_n_differences(&dataset).expect("Failed to plot latest 100 differences");
+    potential_edge_over_n(&dataset).expect("Failed to plot latest edge");
 
     Ok(())
 }
