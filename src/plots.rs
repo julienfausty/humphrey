@@ -1,10 +1,12 @@
 use plotters::prelude::*;
 
 use burn::backend::{NdArray, ndarray::NdArrayDevice};
+use burn::config::Config;
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataset::Dataset;
 use burn::data::dataset::transform::MapperDataset;
 use burn::prelude::s;
+use burn::record::{CompactRecorder, Recorder};
 
 use std::io::{Stdin, stdin};
 
@@ -12,6 +14,12 @@ use std::f64::consts::PI;
 
 mod data;
 use data::{NormalizeOHLCItem, OHLC2Distribution, OHLCBatcher, OHLCDataset, OHLCItem};
+
+mod train;
+use train::TrainingConfig;
+
+mod model;
+use model::Rooney;
 
 const ASSET_DIR: &'static str = "assets/";
 const PRICE_RANGE: (f64, f64) = (0.95, 1.05);
@@ -380,6 +388,128 @@ fn potential_edge_over_n(
     Ok(())
 }
 
+fn latest_distributions_w_prediction(
+    dataset: &MapperDataset<OHLCDataset<NdArray>, NormalizeOHLCItem, OHLCItem<NdArray>>,
+    model: Rooney<NdArray>,
+) -> Result<(), String> {
+    println!("Latest Distribution With Prediction:");
+    let dset_index = dataset.len() - 1;
+
+    let price_width = PRICE_RANGE.1 - PRICE_RANGE.0;
+
+    println!("Preparing data...");
+    let item = dataset.get(dset_index).unwrap();
+    let one_batch = OHLCBatcher {}.batch(vec![item.clone()], &item.block.device());
+
+    let prices = (0..PLOT_GRID_SIZE)
+        .map(|i_grid| price_width * (i_grid as f64) / ((PLOT_GRID_SIZE - 1) as f64) + PRICE_RANGE.0)
+        .collect::<Vec<_>>();
+
+    let projector = OHLC2Distribution;
+    let block_weights: Vec<f32> = projector
+        .project(
+            one_batch.blocks.clone().slice_assign(
+                s![0.., 0.., 0],
+                1.0 - one_batch.blocks.clone().slice(s![0.., 0.., 0]),
+            ),
+            N_KERNELS,
+            PRICE_RANGE,
+        )
+        .reshape([N_KERNELS])
+        .to_data()
+        .to_vec()
+        .unwrap();
+
+    let next_weights: Vec<f32> = projector
+        .project(
+            one_batch.nexts.clone().slice_assign(
+                s![0.., 0.., 0],
+                one_batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
+            ),
+            N_KERNELS,
+            PRICE_RANGE,
+        )
+        .reshape([N_KERNELS])
+        .to_data()
+        .to_vec()
+        .unwrap();
+
+    let predicted_weights: Vec<f32> = model
+        .forward(one_batch.blocks.clone())
+        .reshape([N_KERNELS])
+        .to_data()
+        .to_vec()
+        .unwrap();
+
+    let block_distribution: Vec<f64> = prices
+        .clone()
+        .into_iter()
+        .map(|val| distribution(val, &block_weights))
+        .collect();
+
+    let next_distribution: Vec<f64> = prices
+        .clone()
+        .into_iter()
+        .map(|val| distribution(val, &next_weights))
+        .collect();
+
+    let predicted_distribution: Vec<f64> = prices
+        .clone()
+        .into_iter()
+        .map(|val| distribution(val, &predicted_weights))
+        .collect();
+
+    println!("Plotting...");
+
+    let image_location = format!("{ASSET_DIR}/images/latest_distributions_w_prediction.png");
+    let root_area = BitMapBackend::new(&image_location, (1200, 800)).into_drawing_area();
+
+    root_area.fill(&WHITE).unwrap();
+
+    let max_probability = block_distribution
+        .iter()
+        .fold(0.0, |max, &val| val.max(max))
+        .max(next_distribution.iter().fold(0.0, |max, &val| val.max(max)))
+        as f64;
+
+    let mut context = ChartBuilder::on(&root_area)
+        .set_label_area_size(LabelAreaPosition::Left, 40)
+        .set_label_area_size(LabelAreaPosition::Bottom, 40)
+        .caption("Latest Distribution Pair", ("monospace", 40))
+        .build_cartesian_2d(PRICE_RANGE.0..PRICE_RANGE.1, 0.0..(1.1 * max_probability))
+        .unwrap();
+
+    context.configure_mesh().draw().unwrap();
+
+    let mut draw_distribution = |distro: Vec<f64>, color: RGBColor, label| {
+        context
+            .draw_series(
+                AreaSeries::new(
+                    std::iter::zip(prices.clone().into_iter(), distro),
+                    0.0,
+                    &color.mix(0.2),
+                )
+                .border_style(&color),
+            )
+            .unwrap()
+            .label(label)
+            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &color));
+    };
+
+    draw_distribution(block_distribution, BLUE, "Present");
+    draw_distribution(next_distribution, GREEN, "Future");
+    draw_distribution(predicted_distribution, YELLOW, "Predicted");
+
+    context
+        .configure_series_labels()
+        .border_style(&BLACK)
+        .background_style(&WHITE.mix(0.8))
+        .draw()
+        .unwrap();
+
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let device = NdArrayDevice::default();
 
@@ -391,6 +521,19 @@ fn main() -> Result<(), String> {
     latest_distributions(&dataset).expect("Failed to plot latest distributions");
     latest_n_differences(&dataset).expect("Failed to plot latest 100 differences");
     potential_edge_over_n(&dataset).expect("Failed to plot latest edge");
+
+    let training_dir: Option<&str> = Some("/tmp/rooney");
+    if let Some(artifact_dir) = training_dir {
+        let config = TrainingConfig::load(format!("{artifact_dir}/config.json"))
+            .expect("Could not load configuration in training folder");
+        let record = CompactRecorder::new()
+            .load(format!("{artifact_dir}/model").into(), &device)
+            .expect("Could not load model weights from training folder");
+
+        let model = config.rooney.build::<NdArray>(&device).load_record(record);
+
+        latest_distributions_w_prediction(&dataset, model.clone());
+    }
 
     Ok(())
 }
