@@ -39,7 +39,7 @@ impl<B: AutodiffBackend> TrainStep for Rooney<B> {
             (0.95, 1.05),
         );
 
-        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Sum);
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
 
         let output = RegressionOutput::new(loss, pass, targets);
 
@@ -67,7 +67,7 @@ impl<B: Backend> InferenceStep for Rooney<B> {
             (0.95, 1.05),
         );
 
-        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Sum);
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
 
         RegressionOutput::new(loss, pass, targets)
     }
@@ -80,7 +80,7 @@ pub struct TrainingConfig {
     pub optimizer: AdamConfig,
     #[config(default = 10)]
     pub num_epochs: usize,
-    #[config(default = 1.0e-4)]
+    #[config(default = 1e-4)]
     pub learning_rate: f64,
 }
 
@@ -128,25 +128,26 @@ fn main() -> Result<(), String> {
 
     let artifact_dir = "/tmp/rooney";
 
-    let window_size = 128;
+    let window_size = 256;
 
     let data_config = DataConfig::new()
         .with_use_only(0.01)
+        .with_batch_size(32)
         .with_window_size(window_size);
 
     let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 32)
         .with_latent_size(128)
         .with_n_expansion_stacks(4)
         .with_n_thinking_stacks(1)
-        .with_n_attention_heads(4)
+        .with_n_attention_heads(1)
         .with_n_reasoning_layers(2)
         .with_n_distillation_layers(2);
 
     train::<AutodiffBackendInUse>(
         artifact_dir,
         TrainingConfig::new(data_config, model_config, AdamConfig::new())
-            .with_num_epochs(5)
-            .with_learning_rate(1e-4),
+            .with_num_epochs(3)
+            .with_learning_rate(1e-5),
         device.clone(),
     );
 

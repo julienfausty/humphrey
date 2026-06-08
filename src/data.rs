@@ -3,7 +3,7 @@ use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataloader::{DataLoader, DataLoaderBuilder};
 use burn::data::dataset::Dataset;
 use burn::data::dataset::transform::{Mapper, MapperDataset, SelectionDataset};
-use burn::prelude::s;
+use burn::prelude::{ToElement, s};
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Tensor, TensorData};
 
@@ -127,8 +127,14 @@ impl<B: Backend> Mapper<OHLCItem<B>, OHLCItem<B>> for NormalizeOHLCItem {
         let block_vols = item.block.clone().slice(s![0.., 5]);
         let max_vol = block_vols.clone().max().into_scalar();
 
-        let block_vols = block_vols.div_scalar(max_vol.clone());
-        let next_vols = item.next.clone().slice(s![0.., 5]).div_scalar(max_vol);
+        let (block_vols, next_vols) = if max_vol.to_f64() != 0.0 {
+            (
+                block_vols.div_scalar(max_vol.clone()),
+                item.next.clone().slice(s![0.., 5]).div_scalar(max_vol),
+            )
+        } else {
+            (block_vols, item.next.clone().slice(s![0.., 5]))
+        };
 
         let close = item.block.clone().slice(s![-1, 3]).into_scalar();
 
