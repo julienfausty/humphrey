@@ -1,13 +1,18 @@
 use burn::config::Config;
 use burn::module::Module;
+use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::modules::conv::{Conv1d, Conv1dConfig};
 use burn::nn::modules::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
 use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig1d, Relu};
+use burn::prelude::s;
 use burn::tensor::Tensor;
 use burn::tensor::activation::softmax;
-use burn::tensor::backend::Backend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::train::{InferenceStep, RegressionOutput, TrainOutput, TrainStep};
+
+use crate::data::{OHLC2Distribution, OHLCBatch};
 
 #[derive(Module, Debug)]
 pub struct ExpansionLayer<B: Backend> {
@@ -219,6 +224,60 @@ impl<B: Backend> Rooney<B> {
                 .fold(buffer, |acc, stack| stack.forward(acc)),
             2,
         )
+    }
+}
+
+impl<B: AutodiffBackend> TrainStep for Rooney<B> {
+    type Input = OHLCBatch<B>;
+    type Output = RegressionOutput<B>;
+
+    fn step(&self, batch: OHLCBatch<B>) -> TrainOutput<RegressionOutput<B>> {
+        let pass = self.forward(batch.blocks).reshape([0, -1]);
+
+        let grid_size = pass.shape()[1];
+
+        let projector = OHLC2Distribution;
+
+        let targets = projector.project(
+            batch.nexts.clone().slice_assign(
+                s![0.., 0.., 0],
+                batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
+            ),
+            grid_size,
+            (0.95, 1.05),
+        );
+
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
+
+        let output = RegressionOutput::new(loss, pass, targets);
+
+        TrainOutput::new(self, output.loss.backward(), output)
+    }
+}
+
+impl<B: Backend> InferenceStep for Rooney<B> {
+    type Input = OHLCBatch<B>;
+    type Output = RegressionOutput<B>;
+
+    fn step(&self, batch: OHLCBatch<B>) -> RegressionOutput<B> {
+        let pass = self.forward(batch.blocks).reshape([0, -1]);
+
+        let grid_size = pass.shape()[1];
+
+        let projector = OHLC2Distribution;
+
+        let targets = projector.project(
+            batch.nexts.clone().slice_assign(
+                s![0.., 0.., 0],
+                batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
+            ),
+            grid_size,
+            (0.95, 1.05),
+        );
+
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
+
+        RegressionOutput::new(loss, pass, targets)
     }
 }
 

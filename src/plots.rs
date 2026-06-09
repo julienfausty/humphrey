@@ -5,6 +5,7 @@ use burn::config::Config;
 use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataset::Dataset;
 use burn::data::dataset::transform::MapperDataset;
+use burn::module::Module;
 use burn::prelude::s;
 use burn::record::{CompactRecorder, Recorder};
 
@@ -12,14 +13,9 @@ use std::io::{Stdin, stdin};
 
 use std::f64::consts::PI;
 
-mod data;
-use data::{NormalizeOHLCItem, OHLC2Distribution, OHLCBatcher, OHLCDataset, OHLCItem};
-
-mod train;
-use train::TrainingConfig;
-
-mod model;
-use model::Rooney;
+use rooney::configs::TrainingConfig;
+use rooney::data::{NormalizeOHLCItem, OHLC2Distribution, OHLCBatcher, OHLCDataset, OHLCItem};
+use rooney::model::Rooney;
 
 const ASSET_DIR: &'static str = "assets/";
 const PRICE_RANGE: (f64, f64) = (0.95, 1.05);
@@ -522,7 +518,7 @@ fn main() -> Result<(), String> {
     latest_n_differences(&dataset).expect("Failed to plot latest 100 differences");
     potential_edge_over_n(&dataset).expect("Failed to plot latest edge");
 
-    let training_dir: Option<&str> = Some("/tmp/rooney");
+    let training_dir: Option<&str> = Some("save");
     if let Some(artifact_dir) = training_dir {
         let config = TrainingConfig::load(format!("{artifact_dir}/config.json"))
             .expect("Could not load configuration in training folder");
@@ -532,7 +528,8 @@ fn main() -> Result<(), String> {
 
         let model = config.rooney.build::<NdArray>(&device).load_record(record);
 
-        latest_distributions_w_prediction(&dataset, model.clone());
+        latest_distributions_w_prediction(&dataset, model.clone())
+            .expect("Failed to plot latest distribution with model prediction");
     }
 
     Ok(())
