@@ -5,7 +5,8 @@ use burn::nn::modules::conv::{Conv1d, Conv1dConfig};
 use burn::nn::modules::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
-use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig1d, Relu};
+use burn::nn::pool::{AdaptiveAvgPool1d, AdaptiveAvgPool1dConfig};
+use burn::nn::{Dropout, DropoutConfig, PaddingConfig1d, Relu};
 use burn::prelude::s;
 use burn::tensor::Tensor;
 use burn::tensor::activation::softmax;
@@ -73,7 +74,7 @@ impl ExpansionLayerConfig {
 
 #[derive(Module, Debug)]
 pub struct DistillationLayer<B: Backend> {
-    stacks: Vec<(Linear<B>, Relu, Conv1d<B>, Relu)>,
+    stacks: Vec<(AdaptiveAvgPool1d, Relu, Conv1d<B>, Relu)>,
     dropout: Dropout,
 }
 
@@ -123,11 +124,7 @@ impl DistillationLayerConfig {
             stacks: (0..self.n_stacks)
                 .map(|i_chain| {
                     (
-                        LinearConfig::new(
-                            projection_chain[i_chain].0,
-                            projection_chain[i_chain + 1].0,
-                        )
-                        .init(device),
+                        AdaptiveAvgPool1dConfig::new(projection_chain[i_chain + 1].0).init(),
                         Relu::new(),
                         Conv1dConfig::new(
                             projection_chain[i_chain].1,
