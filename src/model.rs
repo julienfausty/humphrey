@@ -6,7 +6,7 @@ use burn::nn::modules::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
 use burn::nn::pool::{AdaptiveAvgPool1d, AdaptiveAvgPool1dConfig};
-use burn::nn::{Dropout, DropoutConfig, PaddingConfig1d, Relu};
+use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig1d, Relu, Tanh};
 use burn::prelude::s;
 use burn::tensor::Tensor;
 use burn::tensor::activation::softmax;
@@ -207,19 +207,65 @@ impl ThinkingLayerConfig {
 }
 
 #[derive(Module, Debug)]
+pub struct EstimationLayer<B: Backend> {
+    stacks: Vec<(Linear<B>, Tanh)>,
+    logits: Linear<B>,
+    dropout: Dropout,
+}
+
+impl<B: Backend> EstimationLayer<B> {
+    pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
+        softmax(
+            self.logits
+                .forward(self.stacks.iter().fold(input, |acc, stack| {
+                    self.dropout.forward(stack.1.forward(stack.0.forward(acc)))
+                })),
+            2,
+        )
+    }
+}
+
+#[derive(Config, Debug)]
+pub struct EstimationLayerConfig {
+    n_channels: usize,
+
+    #[config(default = 4)]
+    n_stacks: usize,
+    #[config(default = 0.1)]
+    dropout: f64,
+}
+
+impl EstimationLayerConfig {
+    pub fn build<B: Backend>(&self, device: &B::Device) -> EstimationLayer<B> {
+        EstimationLayer {
+            stacks: (0..self.n_stacks)
+                .map(|_| {
+                    (
+                        LinearConfig::new(self.n_channels, self.n_channels).init(device),
+                        Tanh::new(),
+                    )
+                })
+                .collect(),
+            logits: LinearConfig::new(self.n_channels, self.n_channels).init(device),
+            dropout: DropoutConfig::new(self.dropout).init(),
+        }
+    }
+}
+
+#[derive(Module, Debug)]
 pub struct Rooney<B: Backend> {
     ingress: ExpansionLayer<B>,
     stacks: Vec<ThinkingLayer<B>>,
+    estimate: EstimationLayer<B>,
 }
 
 impl<B: Backend> Rooney<B> {
     pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
         let buffer = self.ingress.forward(input.transpose()).transpose();
-        softmax(
+        self.estimate.forward(
             self.stacks
                 .iter()
                 .fold(buffer, |acc, stack| stack.forward(acc)),
-            2,
         )
     }
 }
@@ -299,6 +345,8 @@ pub struct RooneyConfig {
     n_reasoning_layers: usize,
     #[config(default = 4)]
     n_distillation_layers: usize,
+    #[config(default = 4)]
+    n_estimation_layers: usize,
     #[config(default = 0.1)]
     dropout: f64,
 }
@@ -338,6 +386,10 @@ impl RooneyConfig {
                     .build(device)
                 })
                 .collect(),
+            estimate: EstimationLayerConfig::new(self.output_n_channels)
+                .with_n_stacks(self.n_estimation_layers)
+                .with_dropout(self.dropout)
+                .build(device),
         }
     }
 }
