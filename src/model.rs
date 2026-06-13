@@ -1,13 +1,21 @@
 use burn::config::Config;
 use burn::module::Module;
+use burn::nn::loss::{MseLoss, Reduction};
 use burn::nn::modules::conv::{Conv1d, Conv1dConfig};
 use burn::nn::modules::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
-use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig1d, Relu};
+use burn::nn::pool::{AdaptiveAvgPool1d, AdaptiveAvgPool1dConfig};
+use burn::nn::{Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig1d, Relu, Tanh};
+use burn::prelude::s;
 use burn::tensor::Tensor;
 use burn::tensor::activation::softmax;
-use burn::tensor::backend::Backend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::train::{InferenceStep, RegressionOutput, TrainOutput, TrainStep};
+
+use crate::data::{OHLC2Distribution, OHLCBatch};
+
+pub const PRICE_RANGE: (f64, f64) = (0.95, 1.05);
 
 #[derive(Module, Debug)]
 pub struct ExpansionLayer<B: Backend> {
@@ -68,7 +76,7 @@ impl ExpansionLayerConfig {
 
 #[derive(Module, Debug)]
 pub struct DistillationLayer<B: Backend> {
-    stacks: Vec<(Linear<B>, Relu, Conv1d<B>, Relu)>,
+    stacks: Vec<(AdaptiveAvgPool1d, Relu, Conv1d<B>, Relu)>,
     dropout: Dropout,
 }
 
@@ -118,11 +126,7 @@ impl DistillationLayerConfig {
             stacks: (0..self.n_stacks)
                 .map(|i_chain| {
                     (
-                        LinearConfig::new(
-                            projection_chain[i_chain].0,
-                            projection_chain[i_chain + 1].0,
-                        )
-                        .init(device),
+                        AdaptiveAvgPool1dConfig::new(projection_chain[i_chain + 1].0).init(),
                         Relu::new(),
                         Conv1dConfig::new(
                             projection_chain[i_chain].1,
@@ -205,20 +209,120 @@ impl ThinkingLayerConfig {
 }
 
 #[derive(Module, Debug)]
+pub struct EstimationLayer<B: Backend> {
+    stacks: Vec<(Linear<B>, Tanh)>,
+    logits: Linear<B>,
+    dropout: Dropout,
+}
+
+impl<B: Backend> EstimationLayer<B> {
+    pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
+        softmax(
+            self.logits
+                .forward(self.stacks.iter().fold(input, |acc, stack| {
+                    self.dropout.forward(stack.1.forward(stack.0.forward(acc)))
+                })),
+            2,
+        )
+    }
+}
+
+#[derive(Config, Debug)]
+pub struct EstimationLayerConfig {
+    n_channels: usize,
+
+    #[config(default = 4)]
+    n_stacks: usize,
+    #[config(default = 0.1)]
+    dropout: f64,
+}
+
+impl EstimationLayerConfig {
+    pub fn build<B: Backend>(&self, device: &B::Device) -> EstimationLayer<B> {
+        EstimationLayer {
+            stacks: (0..self.n_stacks)
+                .map(|_| {
+                    (
+                        LinearConfig::new(self.n_channels, self.n_channels).init(device),
+                        Tanh::new(),
+                    )
+                })
+                .collect(),
+            logits: LinearConfig::new(self.n_channels, self.n_channels).init(device),
+            dropout: DropoutConfig::new(self.dropout).init(),
+        }
+    }
+}
+
+#[derive(Module, Debug)]
 pub struct Rooney<B: Backend> {
     ingress: ExpansionLayer<B>,
     stacks: Vec<ThinkingLayer<B>>,
+    estimate: EstimationLayer<B>,
 }
 
 impl<B: Backend> Rooney<B> {
     pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
         let buffer = self.ingress.forward(input.transpose()).transpose();
-        softmax(
+        self.estimate.forward(
             self.stacks
                 .iter()
                 .fold(buffer, |acc, stack| stack.forward(acc)),
-            2,
         )
+    }
+}
+
+impl<B: AutodiffBackend> TrainStep for Rooney<B> {
+    type Input = OHLCBatch<B>;
+    type Output = RegressionOutput<B>;
+
+    fn step(&self, batch: OHLCBatch<B>) -> TrainOutput<RegressionOutput<B>> {
+        let pass = self.forward(batch.blocks).reshape([0, -1]);
+
+        let grid_size = pass.shape()[1];
+
+        let projector = OHLC2Distribution;
+
+        let targets = projector.project(
+            batch.nexts.clone().slice_assign(
+                s![0.., 0.., 0],
+                batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
+            ),
+            grid_size,
+            PRICE_RANGE,
+        );
+
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
+
+        let output = RegressionOutput::new(loss, pass, targets);
+
+        TrainOutput::new(self, output.loss.backward(), output)
+    }
+}
+
+impl<B: Backend> InferenceStep for Rooney<B> {
+    type Input = OHLCBatch<B>;
+    type Output = RegressionOutput<B>;
+
+    fn step(&self, batch: OHLCBatch<B>) -> RegressionOutput<B> {
+        let pass = self.forward(batch.blocks).reshape([0, -1]);
+
+        let grid_size = pass.shape()[1];
+
+        let projector = OHLC2Distribution;
+
+        let targets = projector.project(
+            batch.nexts.clone().slice_assign(
+                s![0.., 0.., 0],
+                batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
+            ),
+            grid_size,
+            PRICE_RANGE,
+        );
+
+        let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
+
+        RegressionOutput::new(loss, pass, targets)
     }
 }
 
@@ -243,6 +347,8 @@ pub struct RooneyConfig {
     n_reasoning_layers: usize,
     #[config(default = 4)]
     n_distillation_layers: usize,
+    #[config(default = 4)]
+    n_estimation_layers: usize,
     #[config(default = 0.1)]
     dropout: f64,
 }
@@ -282,6 +388,10 @@ impl RooneyConfig {
                     .build(device)
                 })
                 .collect(),
+            estimate: EstimationLayerConfig::new(self.output_n_channels)
+                .with_n_stacks(self.n_estimation_layers)
+                .with_dropout(self.dropout)
+                .build(device),
         }
     }
 }

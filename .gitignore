@@ -5,3 +5,5 @@ Cargo.lock
 # data
 /data
 /run
+/assets
+/save

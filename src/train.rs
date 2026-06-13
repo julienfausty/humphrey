@@ -1,94 +1,16 @@
 use burn::backend::{Autodiff, Wgpu, wgpu::WgpuDevice};
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::loss::{KLDivLossConfig, Reduction};
 use burn::optim::AdamConfig;
-use burn::prelude::s;
 use burn::record::CompactRecorder;
-use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::tensor::backend::AutodiffBackend;
 use burn::train::metric::LossMetric;
-use burn::train::{
-    InferenceStep, Learner, RegressionOutput, SupervisedTraining, TrainOutput, TrainStep,
-};
+use burn::train::{Learner, SupervisedTraining};
 
 use std::io::{Stdin, stdin};
 
-mod data;
-use data::{DataConfig, OHLC2Distribution, OHLCBatch};
-
-mod model;
-use model::{Rooney, RooneyConfig};
-
-impl<B: AutodiffBackend> TrainStep for Rooney<B> {
-    type Input = OHLCBatch<B>;
-    type Output = RegressionOutput<B>;
-
-    fn step(&self, batch: OHLCBatch<B>) -> TrainOutput<RegressionOutput<B>> {
-        let pass = self.forward(batch.blocks).reshape([0, -1]);
-
-        let grid_size = pass.shape()[1];
-
-        let projector = OHLC2Distribution;
-
-        let targets = projector.project(
-            batch.nexts.clone().slice_assign(
-                s![0.., 0.., 0],
-                batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
-            ),
-            grid_size,
-        );
-
-        let loss = KLDivLossConfig::new().init().forward(
-            pass.clone(),
-            targets.clone(),
-            Reduction::BatchMean,
-        );
-
-        let output = RegressionOutput::new(loss, pass, targets);
-
-        TrainOutput::new(self, output.loss.backward(), output)
-    }
-}
-
-impl<B: Backend> InferenceStep for Rooney<B> {
-    type Input = OHLCBatch<B>;
-    type Output = RegressionOutput<B>;
-
-    fn step(&self, batch: OHLCBatch<B>) -> RegressionOutput<B> {
-        let pass = self.forward(batch.blocks).reshape([0, -1]);
-
-        let grid_size = pass.shape()[1];
-
-        let projector = OHLC2Distribution;
-
-        let targets = projector.project(
-            batch.nexts.clone().slice_assign(
-                s![0.., 0.., 0],
-                batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
-            ),
-            grid_size,
-        );
-
-        let loss = KLDivLossConfig::new().init().forward(
-            pass.clone(),
-            targets.clone(),
-            Reduction::BatchMean,
-        );
-
-        RegressionOutput::new(loss, pass, targets)
-    }
-}
-
-#[derive(Config, Debug)]
-pub struct TrainingConfig {
-    pub data: DataConfig,
-    pub rooney: RooneyConfig,
-    pub optimizer: AdamConfig,
-    #[config(default = 10)]
-    pub num_epochs: usize,
-    #[config(default = 1.0e-4)]
-    pub learning_rate: f64,
-}
+use rooney::configs::{DataConfig, TrainingConfig};
+use rooney::model::RooneyConfig;
 
 fn create_artifact_dir(artifact_dir: &str) {
     // Remove existing artifacts before to get an accurate learner summary
@@ -134,25 +56,27 @@ fn main() -> Result<(), String> {
 
     let artifact_dir = "/tmp/rooney";
 
-    let window_size = 64;
+    let window_size = 256;
 
     let data_config = DataConfig::new()
-        .with_use_only(0.05)
+        .with_use_only(0.01)
+        .with_batch_size(16)
         .with_window_size(window_size);
 
     let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 32)
         .with_latent_size(128)
         .with_n_expansion_stacks(4)
-        .with_n_thinking_stacks(1)
+        .with_n_thinking_stacks(2)
         .with_n_attention_heads(4)
-        .with_n_reasoning_layers(2)
-        .with_n_distillation_layers(2);
+        .with_n_reasoning_layers(3)
+        .with_n_distillation_layers(4)
+        .with_n_estimation_layers(3);
 
     train::<AutodiffBackendInUse>(
         artifact_dir,
         TrainingConfig::new(data_config, model_config, AdamConfig::new())
-            .with_num_epochs(5)
-            .with_learning_rate(1e-3),
+            .with_num_epochs(3)
+            .with_learning_rate(1e-4),
         device.clone(),
     );
 

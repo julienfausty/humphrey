@@ -8,12 +8,12 @@ The goal of the analyst is to predict the asset price probablity distribution ov
 The output of the model should be a probablity density function:
 ```math
 \begin{split}
-  \phi: & [0, 2] \rightarrow [0, 1]\\
+  \phi: & [p_{min}, p_{max}] \rightarrow [0, 1]\\
      & \phi(p) = P(p | [t, t + \Delta t])
 \end{split}
 ```
 
-where `p` is a normalized price, `t` is a time coordinate and `P` is the probability density for that asset to be at price `p` over the provided time range.
+where `p` is a normalized price (with $(p_{min}, p_{max})$ the range of normalized prices considered), `t` is a time coordinate and `P` is the probability density for that asset to be at price `p` over the provided time range.
 
 
 ## Setup
@@ -28,6 +28,12 @@ cargo build --release
 for running training:
 ```shell
 cargo run --release --bin train < your_ohlc_data.csv
+```
+
+for plotting statistics from the dataset:
+```shell
+mkdir -p assets/images
+cargo run --release --bin plots < your_ohlc_data.csv
 ```
 
 ## Data
@@ -53,13 +59,14 @@ For training, the data is windowed (following a user defined window size) and ea
 ```math
 \begin{split}
 \tilde{t} &= \frac{(t - t_{start})}{(t_{end} - t_{start})}\\
-\tilde{p} &= \frac{p}{p_{max}}\\
+\tilde{p} &= \frac{p}{p_{close}}\\
 \tilde{v} &= \frac{v}{v_{max}}
 \end{split}
 ```
 
 where:
-* $t$, $p$ and $v$ are time, price (low, high, open and close together) and volume respectively, and
+* $t$, $p$ and $v$ are time, price (low, high, open and close together) and volume respectively,
+* $p_{close}$ is the close of the asset at the end of the block, and
 * tilded quantities are normalized (in the rest of the document, we will only use normalized quantities unless specified and so the tilde is omitted)
 
 Each item passed to training contains an OHLC data window and the next unoverlapping window normalized with the values from the current window for evaluating loss and predictive power.
@@ -75,17 +82,16 @@ Data is batched for training and testing to parallelize and speed up the trainin
 
 ## Model
 
-Rooney is a Transformer Encoder based model largely inspired from the seminal [Attention is all you need](https://arxiv.org/abs/1706.03762) paper. The model is composed of two different stages:
+Rooney is a Transformer Encoder based model largely inspired from the seminal [Attention is all you need](https://arxiv.org/abs/1706.03762) paper. The model is composed of three different stages:
 * Ingress / Expansion: A convolutional stage (multiple convolutional layers) that expand the OHLC data into learned features useful for predicting the next distribution of prices.
-* Reasoning: A stage composed of multiple stacks with each stack defined by a transformer encoder block with multiple layers followed by a distillation block that reduces the dimensionality of the data. The goal is to have the model reason on the features generated in the expansion stage and pipe the insights to a prediction of the next period's price distribution. The distillation block is comprised of both feed-forward layers for reducing the sequence length in a learned manner and convolutional layers for reducing the feature space.
-
-The final output of the reasoning stage goes through a `softmax` operation in order to generate the qualities of a probability distribution.
+* Reasoning: A stage composed of multiple stacks with each stack defined by a transformer encoder block with multiple layers followed by a distillation block that reduces the dimensionality of the data. The goal is to have the model reason on the features generated in the expansion stage and pipe the insights to a prediction of the next period's price distribution. The distillation block is comprised of both pooling layers for reducing the sequence length in a learned manner and convolutional layers for reducing the feature space.
+* Estimation: A step meant to convert the latent space obtained from reasoning into a probability distribution over prices. It is composed of a feed forward netword with tanh activations finishing in a softmax.
 
 ## Evaluation
 
 The model will ultimately output a tensor with floating point values. The evaluation of the loss during training will ultimately determine the meaning of these values and how they evolve as the model improves.
 
-Given that the model is attempting to reconstruct a probability density function, we will use a set of basis functions $\mathbf{G} = \{g_{i}: [0, 2] \rightarrow [0, 1]\}$ such that:
+Given that the model is attempting to reconstruct a probability density function, we will use a set of basis functions $\mathbf{G} = \{g_{i}: [p_{min}, p_{max}] \rightarrow [0, 1]\}$ such that:
 ```math
 \phi(p) = \omega^{i}g_{i}(p)
 ```
@@ -93,18 +99,18 @@ where $\omega^{i}$ are the weights predicted by the model for a given OHLC windo
 
 Given the probabilistic nature of the problem, our first approach is to use gaussian kernel functions as the basis functions on a regular grid for the framing of the solution. As such, for a given grid size $N \gt 1$:
 ```math
-g_{i\in[0, N[}(p \in [0, 2]) = \dfrac{1}{\sigma\sqrt{2\pi}}e^{-\frac{(p - 2i/(N-1))^2}{2\sigma^2}}
+g_{i\in[0, N[}(p \in [p_{min}, p_{max}]) = \dfrac{1}{\sigma\sqrt{2\pi}}e^{-\frac{(p - (\frac{(p_{max} - p_{min})i}{(N-1)} + p_{min}))^2}{2\sigma^2}}
 ```
 
 where we choose $\sigma$ such that neighboring kernels overlap at one $\sigma$ intervals:
 
 ```math
-\sigma = \frac{1}{N-1}
+\sigma = \frac{p_{max} - p_{min}}{2(N-1)}
 ```
 
 such that:
 ```math
-g_{i\in[0, N[}(p \in [0, 2]) = \dfrac{N-1}{\sqrt{2\pi}}e^{-\frac{(p(N-1) - 2i)^2}{2}}
+g_{i\in[0, N[}(p \in [0, 2]) = \dfrac{2(N-1)}{(p_{max} - p_{min})\sqrt{2\pi}}e^{-\frac{((p - p_{min})\frac{2(N-1)}{p_{max} - p_{min}} - 2i )^2}{2}}
 ```
 
 In order to satisfy the constraints of a probability density function:
@@ -150,8 +156,8 @@ Given the structure given to the candlestick contribution, in order to calculate
 
 ```math
 \begin{split}
-\int_{0}^{2} \lambda_{\nu,\delta}(p) g_{i}(p) dp &= \int_{0}^{2} \dfrac{N-1}{\sqrt{2\pi}}e^{-\frac{(p(N-1) - 2i)^2}{2}} \dfrac{1}{\delta\sqrt{2\pi}}e^{-\frac{(p - \nu)^2}{2\delta^2}} dp\\
-&= \dfrac{N-1}{2\delta \pi} \int_{0}^{2} e^{-\frac{1}{2}\left((N-1)p - 2i\right)^2} e^{- \frac{1}{2}\left(\frac{1}{\delta}p - \frac{\nu}{\delta}\right)^2}
+\int_{0}^{2} \lambda_{\nu,\delta}(p) g_{i}(p) dp &= \int_{0}^{2} \dfrac{2(N-1)}{(p_{max} - p_{min})\sqrt{2\pi}}e^{-\frac{((p - p_{min})\frac{2(N-1)}{p_{max} - p_{min}} - 2i)^2}{2}} \dfrac{1}{\delta\sqrt{2\pi}}e^{-\frac{(p - \nu)^2}{2\delta^2}} dp\\
+&= \dfrac{(N-1)}{(p_{max} - p_{min})\delta \pi} \int_{0}^{2}e^{-\frac{((p - p_{min})\frac{2(N-1)}{p_{max} - p_{min}} - i)^2}{2}} e^{- \frac{1}{2}\left(\frac{1}{\delta}p - \frac{\nu}{\delta}\right)^2}
 \end{split}
 ```
 
@@ -161,35 +167,27 @@ Using the indefinite integral:
 \int e^{- \frac{1}{2} (ax - b)^2} e^{-\frac{1}{2} (cx - d)^2} dx = \sqrt{\frac{\pi}{2(a^2 + c^2)}} \exp\left(-\dfrac{(bc - ad)^2}{2(a^2 + c^2)}\right)\erf\left(\dfrac{(a^2 + c^2)x - (ab + cd)}{\sqrt{2(a^2 + c^2)}}\right),
 ```
 
-with $\erf$ the [error function](https://www.wolframalpha.com/input/?i=erf%28x%29%29%27),
-
-and replacing with quantities of interest:
+with $\erf$ the [error function](https://www.wolframalpha.com/input/?i=erf%28x%29%29%27), and the quantities of interest:
 
 ```math
 \begin{split}
-a &= (N-1)\\
-b &= 2i\\
+a &= \dfrac{2(N-1)}{p_{max} - p_{min}}\\
+b &= 2i + \frac{2p_{min}(N-1)}{p_{max} - p_{min}}\\
 c &= \delta^{-1}\\
 d &= \nu\delta^{-1}
 \end{split}
 ```
-
-we have that:
-```math
-\begin{split}
-\int_{0}^{2} \lambda_{\nu,\delta}(p) g_{i}(p) dp &=\frac{N-1}{\sqrt{8\pi((N-1)^2 + \delta^{-2})}} \exp\left(-\dfrac{(2i\delta^{-1} - (N-1)\nu\delta^{-1})^2}{2((N-1)^2 + \delta^{-2})}\right)\left[\erf\left(\dfrac{((N-1)^2 + \delta^{-2})p - ((N-1)2i + \nu\delta^{-2})}{\sqrt{2((N-1)^2 + \delta^{-2})}}\right)\right]_{0}^{2}
-\end{split}
-```
-
 computable directly for each grid point and $(o, h, l, c)$ candlestick.
 
 
-The loss of the model can then computed using the [Kullback-Leibler divergence](https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence) for evaluating the non-similarity between probability distributions:
+The loss of the model can then computed using a classic mean squared error:
 ```math
-\mathcal{L}(\tilde{\phi}, \phi) = \int_{0}^{2} \tilde{\phi}\log\frac{\tilde{\phi}}{\phi} dp
+\mathcal{L} = \sum_{i=0}^{N-1} (\omega^{i} - \tilde{\omega}^{i})^{2}
 ```
 
-For simplicity, a proxy of the loss is computed discretely with:
-```math
-L(\tilde{\phi}, \phi) = \sum_{i = 0}^{N-1} \tilde{\omega}_{i} \log\frac{\tilde{\omega}_{i}}{\omega{i}}
-```
+## Result Log
+
+* First runs heavily penalized by a price range too large for the time window leading to a very sharp distribution. Reduced price range to +/- single digit percentages.
+* Playing around with many different hyper-parameters to start getting sensible results. Limited computational capacity of my GPU constains the size of the model I can use as well as the size of the time context window.
+* Training over low number of epochs leads to distributions that start looking like the targets but look stationnary. Loss has trouble going under `3e-3` in general. Very possible that the context window sizes are too small to generate meaningful predictions.
+* Random divergences of the training to `NaN` values points to some instability in the model / training

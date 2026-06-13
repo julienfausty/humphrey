@@ -1,18 +1,12 @@
-use burn::config::Config;
 use burn::data::dataloader::batcher::Batcher;
-use burn::data::dataloader::{DataLoader, DataLoaderBuilder};
 use burn::data::dataset::Dataset;
-use burn::data::dataset::transform::{Mapper, MapperDataset, SelectionDataset};
-use burn::prelude::s;
+use burn::data::dataset::transform::Mapper;
+use burn::prelude::{ToElement, s};
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Tensor, TensorData};
 
-use rand::{RngExt, SeedableRng, rngs::ChaCha8Rng};
-
 use csv;
-use std::collections::HashSet;
 use std::io::Read;
-use std::sync::Arc;
 
 /// In memory structure for a line of CSV data
 #[derive(Debug, serde::Deserialize)]
@@ -127,13 +121,19 @@ impl<B: Backend> Mapper<OHLCItem<B>, OHLCItem<B>> for NormalizeOHLCItem {
         let block_vols = item.block.clone().slice(s![0.., 5]);
         let max_vol = block_vols.clone().max().into_scalar();
 
-        let block_vols = block_vols.div_scalar(max_vol.clone());
-        let next_vols = item.next.clone().slice(s![0.., 5]).div_scalar(max_vol);
+        let (block_vols, next_vols) = if max_vol.to_f64() != 0.0 {
+            (
+                block_vols.div_scalar(max_vol.clone()),
+                item.next.clone().slice(s![0.., 5]).div_scalar(max_vol),
+            )
+        } else {
+            (block_vols, item.next.clone().slice(s![0.., 5]))
+        };
 
-        let high = item.block.clone().slice(s![0.., 4]).max().into_scalar();
+        let close = item.block.clone().slice(s![-1, 3]).into_scalar();
 
-        let block_prices = (item.block.clone().slice(s![0.., 1..5])).div_scalar(high.clone());
-        let next_prices = (item.next.clone().slice(s![0.., 1..5])).div_scalar(high.clone());
+        let block_prices = (item.block.clone().slice(s![0.., 1..5])).div_scalar(close.clone());
+        let next_prices = (item.next.clone().slice(s![0.., 1..5])).div_scalar(close.clone());
 
         let block = item.block.clone().zeros_like();
         let next = item.next.clone().zeros_like();
@@ -184,12 +184,17 @@ impl<B: Backend> Batcher<B, OHLCItem<B>, OHLCBatch<B>> for OHLCBatcher {
 pub struct OHLC2Distribution;
 
 impl OHLC2Distribution {
-    pub fn project<B: Backend>(&self, ohlc: Tensor<B, 3>, grid_size: usize) -> Tensor<B, 2> {
+    pub fn project<B: Backend>(
+        &self,
+        ohlc: Tensor<B, 3>,
+        grid_size: usize,
+        price_range: (f64, f64),
+    ) -> Tensor<B, 2> {
         let prices = ohlc
             .clone()
             .slice(s![0.., 0.., 1..5])
             .sort(2)
-            .clamp(0.0, 2.0);
+            .clamp(price_range.0, price_range.1);
         let time_discount = ohlc
             .clone()
             .slice(s![0.., 0.., 0])
@@ -216,7 +221,9 @@ impl OHLC2Distribution {
                 .repeat_dim(1, prices.shape()[1])
                 .repeat_dim(0, prices.shape()[0]);
 
-        let a = (grid_size - 1) as f64;
+        let range_width = price_range.1 - price_range.0;
+        let a = 2.0 * ((grid_size - 1) as f64) / range_width;
+        let pre_b = a * price_range.0;
         let c = anchors.clone().slice(s![0.., 0.., 1]).recip();
         let d = anchors.clone().slice(s![0.., 0.., 0]).mul(c.clone());
 
@@ -237,7 +244,7 @@ impl OHLC2Distribution {
                 &prices.device(),
             ),
             |acc, i_grid| {
-                let b = 2.0 * (i_grid as f64);
+                let b = 2.0 * (i_grid as f64) + pre_b;
                 let contribution = (c.clone().mul_scalar(b) - d.clone().mul_scalar(a))
                     .powf_scalar(2.0)
                     .div(a2c2.clone().mul_scalar(2))
@@ -259,10 +266,12 @@ impl OHLC2Distribution {
                 let b = 2.0 * (i_grid as f64);
                 let sqrt_two_a2c2 = a2c2.clone().mul_scalar(2.0).sqrt();
                 let ab_plus_cd = c.clone().mul(d.clone()) + a * b;
-                let contribution = (a2c2.clone().mul_scalar(2.0) - ab_plus_cd.clone())
+                let contribution = (a2c2.clone().mul_scalar(price_range.1) - ab_plus_cd.clone())
                     .div(sqrt_two_a2c2.clone())
                     .erf()
-                    - ab_plus_cd.clone().neg().div(sqrt_two_a2c2.clone()).erf();
+                    - (a2c2.clone().mul_scalar(price_range.0) - ab_plus_cd.clone())
+                        .div(sqrt_two_a2c2.clone())
+                        .erf();
                 acc.clone().slice_assign(
                     s![0.., 0.., i_grid],
                     contribution + acc.clone().slice(s![0.., 0.., i_grid]),
@@ -279,97 +288,6 @@ impl OHLC2Distribution {
         convolution
             .clone()
             .div(convolution.clone().sum_dim(1).repeat_dim(1, grid_size))
-    }
-}
-
-/// Utility struct for configuring the train/test data split and providing data loaders for training
-#[derive(Config, Debug)]
-pub struct DataConfig {
-    #[config(default = 1.0)]
-    pub use_only: f32,
-    #[config(default = 0.8)]
-    pub train_split: f32,
-    #[config(default = 32)]
-    pub batch_size: usize,
-    #[config(default = 4)]
-    pub num_workers: usize,
-    #[config(default = 64)]
-    pub window_size: usize,
-    #[config(default = 42)]
-    pub seed: u64,
-}
-
-impl DataConfig {
-    /// Method for coalescing the builder pattern into the train and test data (respectively)
-    /// User must provide a readable source formatted in McZielinski CSV style
-    pub fn build<R: Read, B: AutodiffBackend>(
-        &self,
-        source: R,
-        device: &B::Device,
-    ) -> Result<
-        (
-            Arc<dyn DataLoader<B, OHLCBatch<B>>>,
-            Arc<dyn DataLoader<B::InnerBackend, OHLCBatch<B::InnerBackend>>>,
-        ),
-        String,
-    > {
-        let base_dataset = match OHLCDataset::<B>::new(self.window_size.clone(), source, &device) {
-            Ok(ds) => ds,
-            Err(message) => return Err(message),
-        };
-
-        let visible_portion = (base_dataset.len() as f32 * self.use_only) as usize;
-        let block_size = 4 * self.window_size + self.batch_size.clone();
-        let total_visible_blocks = visible_portion / block_size.clone();
-        let number_test_blocks =
-            (total_visible_blocks.clone() as f32 * (1.0 - self.train_split)) as usize;
-
-        let mut rng = ChaCha8Rng::seed_from_u64(self.seed.clone());
-        let test_blocks: HashSet<usize> = (0..number_test_blocks)
-            .map(|_| rng.random_range(0..total_visible_blocks.clone()))
-            .collect();
-
-        let train_blocks: Vec<usize> = (0..total_visible_blocks)
-            .filter(|i_block| !test_blocks.contains(i_block))
-            .collect();
-        let test_blocks = Vec::from_iter(test_blocks.into_iter());
-
-        let unroll = |set: Vec<usize>| {
-            let mut unrolled = Vec::with_capacity(set.len() * block_size.clone());
-            let origin = base_dataset.len();
-            for i_block in set.into_iter() {
-                let offset = block_size.clone() * i_block;
-                for j_inner in 0..block_size.clone() {
-                    unrolled.push(origin - offset - j_inner - 1)
-                }
-            }
-            unrolled
-        };
-
-        let batcher = OHLCBatcher {};
-
-        let train_set = DataLoaderBuilder::new(batcher.clone())
-            .batch_size(self.batch_size.clone())
-            .shuffle(self.seed.clone())
-            .num_workers(self.num_workers.clone())
-            .build(SelectionDataset::from_indices_unchecked(
-                MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem),
-                unroll(train_blocks),
-            ));
-
-        let test_set = DataLoaderBuilder::new(batcher.clone())
-            .batch_size(self.batch_size.clone())
-            .shuffle(self.seed.clone())
-            .num_workers(self.num_workers.clone())
-            .build(SelectionDataset::from_indices_unchecked(
-                MapperDataset::new(
-                    MapperDataset::new(base_dataset.clone(), NormalizeOHLCItem),
-                    ToInnerBackend,
-                ),
-                unroll(test_blocks),
-            ));
-
-        Ok((train_set, test_set))
     }
 }
 
@@ -561,14 +479,14 @@ mod tests {
             block: Tensor::<NdArray, 2>::from_data(
                 [
                     [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-                    [6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                    [6.0, 7.0, 8.0, 10.0, 9.0, 11.0],
                 ],
                 &device,
             ),
             next: Tensor::<NdArray, 2>::from_data(
                 [
                     [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
-                    [6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                    [6.0, 7.0, 8.0, 10.0, 9.0, 11.0],
                 ],
                 &device,
             ),
@@ -583,7 +501,7 @@ mod tests {
                 .equal(Tensor::<NdArray, 2>::from_data(
                     [
                         [0.0, 0.1, 0.2, 0.3, 0.4, 5.0 / 11.0],
-                        [1.0, 0.7, 0.8, 0.9, 1.0, 1.0],
+                        [1.0, 0.7, 0.8, 1.0, 0.9, 1.0],
                     ],
                     &device,
                 ))
@@ -597,7 +515,7 @@ mod tests {
                 .equal(Tensor::<NdArray, 2>::from_data(
                     [
                         [0.0, 0.1, 0.2, 0.3, 0.4, 5.0 / 11.0],
-                        [1.0, 0.7, 0.8, 0.9, 1.0, 1.0],
+                        [1.0, 0.7, 0.8, 1.0, 0.9, 1.0],
                     ],
                     &device,
                 ))
@@ -615,7 +533,7 @@ mod tests {
                     [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
                     [6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
                     [12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
-                    [18.0, 19.0, 20.0, 21.0, 22.0, 23.0],
+                    [18.0, 19.0, 20.0, 22.0, 21.0, 23.0],
                 ],
                 &device,
             ),
@@ -624,7 +542,7 @@ mod tests {
                     [30.0, 31.0, 32.0, 33.0, 34.0, 35.0],
                     [36.0, 37.0, 38.0, 39.0, 40.0, 41.0],
                     [42.0, 43.0, 44.0, 45.0, 46.0, 47.0],
-                    [48.0, 49.0, 50.0, 51.0, 52.0, 53.0],
+                    [48.0, 49.0, 50.0, 52.0, 51.0, 53.0],
                 ],
                 &device,
             ),
@@ -662,7 +580,7 @@ mod tests {
                             16.0 / 22.0,
                             17.0 / 23.0
                         ],
-                        [1.0, 19.0 / 22.0, 20.0 / 22.0, 21.0 / 22.0, 1.0, 1.0],
+                        [1.0, 19.0 / 22.0, 20.0 / 22.0, 1.0, 21.0 / 22.0, 1.0],
                     ],
                     &device,
                 ))
@@ -703,8 +621,8 @@ mod tests {
                             48.0 / 18.0,
                             49.0 / 22.0,
                             50.0 / 22.0,
-                            51.0 / 22.0,
                             52.0 / 22.0,
+                            51.0 / 22.0,
                             53.0 / 23.0
                         ],
                     ],
@@ -782,7 +700,7 @@ mod tests {
         let test_ohlc = Tensor::<NdArray, 1>::from_data([0.0, 0.0, 0.0, 2.0, 2.0, 1.0], &device)
             .reshape([1, 1, 6]);
 
-        let projection = projector.project(test_ohlc, 10);
+        let projection = projector.project(test_ohlc, 10, (0.0, 2.0));
 
         assert!(projection.shape().len() == 2);
         assert!(projection.shape()[0] == 1);
@@ -829,7 +747,7 @@ mod tests {
         )
         .reshape([1, 2, 6]);
 
-        let projection = projector.project(test_ohlc, 10);
+        let projection = projector.project(test_ohlc, 10, (0.0, 2.0));
 
         assert!(projection.shape().len() == 2);
         assert!(projection.shape()[0] == 1);
@@ -877,7 +795,7 @@ mod tests {
             &device,
         );
 
-        let projection = projector.project(test_ohlc, 10);
+        let projection = projector.project(test_ohlc, 10, (0.0, 2.0));
 
         assert!(projection.shape().len() == 2);
         assert!(projection.shape()[0] == 4);
