@@ -82,11 +82,10 @@ Data is batched for training and testing to parallelize and speed up the trainin
 
 ## Model
 
-Rooney is a Transformer Encoder based model largely inspired from the seminal [Attention is all you need](https://arxiv.org/abs/1706.03762) paper. The model is composed of two different stages:
+Rooney is a Transformer Encoder based model largely inspired from the seminal [Attention is all you need](https://arxiv.org/abs/1706.03762) paper. The model is composed of three different stages:
 * Ingress / Expansion: A convolutional stage (multiple convolutional layers) that expand the OHLC data into learned features useful for predicting the next distribution of prices.
-* Reasoning: A stage composed of multiple stacks with each stack defined by a transformer encoder block with multiple layers followed by a distillation block that reduces the dimensionality of the data. The goal is to have the model reason on the features generated in the expansion stage and pipe the insights to a prediction of the next period's price distribution. The distillation block is comprised of both feed-forward layers for reducing the sequence length in a learned manner and convolutional layers for reducing the feature space.
-
-The final output of the reasoning stage goes through a `softmax` operation in order to generate the qualities of a probability distribution.
+* Reasoning: A stage composed of multiple stacks with each stack defined by a transformer encoder block with multiple layers followed by a distillation block that reduces the dimensionality of the data. The goal is to have the model reason on the features generated in the expansion stage and pipe the insights to a prediction of the next period's price distribution. The distillation block is comprised of both pooling layers for reducing the sequence length in a learned manner and convolutional layers for reducing the feature space.
+* Estimation: A step meant to convert the latent space obtained from reasoning into a probability distribution over prices. It is composed of a feed forward netword with tanh activations finishing in a softmax.
 
 ## Evaluation
 
@@ -185,3 +184,10 @@ The loss of the model can then computed using a classic mean squared error:
 ```math
 \mathcal{L} = \sum_{i=0}^{N-1} (\omega^{i} - \tilde{\omega}^{i})^{2}
 ```
+
+## Result Log
+
+* First runs heavily penalized by a price range too large for the time window leading to a very sharp distribution. Reduced price range to +/- single digit percentages.
+* Playing around with many different hyper-parameters to start getting sensible results. Limited computational capacity of my GPU constains the size of the model I can use as well as the size of the time context window.
+* Training over low number of epochs leads to distributions that start looking like the targets but look stationnary. Loss has trouble going under `3e-3` in general. Very possible that the context window sizes are too small to generate meaningful predictions.
+* Random divergences of the training to `NaN` values points to some instability in the model / training
