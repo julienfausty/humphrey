@@ -60,22 +60,23 @@ fn main() -> Result<(), String> {
 
     let data_config = DataConfig::new()
         .with_use_only(0.01)
-        .with_batch_size(32)
+        .with_batch_size(16)
         .with_window_size(window_size);
 
     let model_config = RooneyConfig::new(window_size, 6 /*ohlc features*/, 1, 32)
         .with_latent_size(128)
         .with_n_expansion_stacks(4)
-        .with_n_thinking_stacks(1)
-        .with_n_attention_heads(1)
-        .with_n_reasoning_layers(2)
-        .with_n_distillation_layers(2);
+        .with_n_thinking_stacks(2)
+        .with_n_attention_heads(4)
+        .with_n_reasoning_layers(3)
+        .with_n_distillation_layers(4)
+        .with_n_estimation_layers(3);
 
     train::<AutodiffBackendInUse>(
         artifact_dir,
         TrainingConfig::new(data_config, model_config, AdamConfig::new())
             .with_num_epochs(3)
-            .with_learning_rate(1e-5),
+            .with_learning_rate(1e-4),
         device.clone(),
     );
 

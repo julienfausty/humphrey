@@ -15,10 +15,9 @@ use std::f64::consts::PI;
 
 use rooney::configs::TrainingConfig;
 use rooney::data::{NormalizeOHLCItem, OHLC2Distribution, OHLCBatcher, OHLCDataset, OHLCItem};
-use rooney::model::Rooney;
+use rooney::model::{PRICE_RANGE, Rooney};
 
 const ASSET_DIR: &'static str = "assets/";
-const PRICE_RANGE: (f64, f64) = (0.95, 1.05);
 const PLOT_GRID_SIZE: usize = 512;
 const N_KERNELS: usize = 32;
 const BLOCK_SIZE: usize = 256;
@@ -436,6 +435,9 @@ fn latest_distributions_w_prediction(
         .to_data()
         .to_vec()
         .unwrap();
+
+    println!("Next weights:\n{:?}", next_weights);
+    println!("Predicted weights:\n{:?}", predicted_weights);
 
     let block_distribution: Vec<f64> = prices
         .clone()

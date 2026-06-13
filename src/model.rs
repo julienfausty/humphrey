@@ -15,6 +15,8 @@ use burn::train::{InferenceStep, RegressionOutput, TrainOutput, TrainStep};
 
 use crate::data::{OHLC2Distribution, OHLCBatch};
 
+pub const PRICE_RANGE: (f64, f64) = (0.95, 1.05);
+
 #[derive(Module, Debug)]
 pub struct ExpansionLayer<B: Backend> {
     stacks: Vec<(Conv1d<B>, Relu)>,
@@ -287,7 +289,7 @@ impl<B: AutodiffBackend> TrainStep for Rooney<B> {
                 batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
             ),
             grid_size,
-            (0.95, 1.05),
+            PRICE_RANGE,
         );
 
         let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
@@ -315,7 +317,7 @@ impl<B: Backend> InferenceStep for Rooney<B> {
                 batch.nexts.clone().slice(s![0.., 0.., 0]) - 1.0,
             ),
             grid_size,
-            (0.95, 1.05),
+            PRICE_RANGE,
         );
 
         let loss = MseLoss::new().forward(pass.clone(), targets.clone(), Reduction::Mean);
